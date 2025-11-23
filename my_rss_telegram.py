@@ -6,6 +6,10 @@ import re
 import html
 from datetime import datetime
 import os
+from flask import Flask
+import threading
+
+app = Flask(__name__)
 
 # =============================================================================
 # НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
@@ -156,7 +160,7 @@ def send_to_telegram(title, description, link, source_name, pub_date, image_url=
 # ОСНОВНОЙ ЦИКЛ БОТА
 # =============================================================================
 
-def main():
+def run_bot():
     last_links = {}
 
     print("🚀 Бот запущен и начинает мониторинг...")
@@ -263,5 +267,22 @@ def main():
             print("🔄 Перезапуск через 60 секунд...")
             time.sleep(60)
 
+# =============================================================================
+# МИНИМАЛЬНЫЙ FLASK ДЛЯ ПОРТА
+# =============================================================================
+
+@app.route('/')
+def home():
+    return "🤖 Telegram RSS Bot работает!"
+
+@app.route('/ping')
+def ping():
+    return "pong"
+
+# Запускаем бот в отдельном потоке
+bot_thread = threading.Thread(target=run_bot)
+bot_thread.daemon = True
+bot_thread.start()
+
 if __name__ == '__main__':
-    main()
+    app.run(host='0.0.0.0', port=5000, debug=False)
