@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import feedparser_py3 as feedparser
+import feedparser
 import time
 import requests
 import re
