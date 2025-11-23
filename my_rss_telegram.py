@@ -6,10 +6,6 @@ import re
 import html
 from datetime import datetime
 import os
-from flask import Flask
-import threading
-
-app = Flask(__name__)
 
 # =============================================================================
 # НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
@@ -41,7 +37,7 @@ RSS_SOURCES = [
 ]
 
 # =============================================================================
-# ФУНКЦИИ (без изменений)
+# ФУНКЦИИ
 # =============================================================================
 
 def is_russian_text(text):
@@ -150,7 +146,7 @@ def send_to_telegram(title, description, link, source_name, pub_date, image_url=
             print(f"✅ Отправлено: {title[:50]}...")
             return True
         else:
-            print(f"❌ Ошибка: {response.status_code}")
+            print(f"❌ Ошибка Telegram: {response.status_code} - {response.text}")
             return False
     except Exception as e:
         print(f"💥 Ошибка отправки: {e}")
@@ -160,7 +156,7 @@ def send_to_telegram(title, description, link, source_name, pub_date, image_url=
 # ОСНОВНОЙ ЦИКЛ БОТА
 # =============================================================================
 
-def run_bot():
+def main():
     last_links = {}
 
     print("🚀 Бот запущен и начинает мониторинг...")
@@ -173,23 +169,42 @@ def run_bot():
             if feed.entries:
                 last_links[url] = feed.entries[0].link
                 print(f"✅ Инициализирован: {url}")
+                print(f"   Первая новость: {feed.entries[0].title[:50]}...")
+            else:
+                print(f"⚠️  Нет новостей в ленте: {url}")
         except Exception as e:
             print(f"💥 Ошибка инициализации {url}: {e}")
+
+    print(f"📝 Всего инициализировано лент: {len(last_links)}")
 
     # Бесконечный цикл проверки
     while True:
         try:
+            print(f"\n🔍 Начинаю проверку всех источников... ({datetime.now().strftime('%H:%M:%S')})")
+
+            found_new_news = False
+
             for url in RSS_SOURCES:
                 try:
+                    print(f"📡 Проверяю: {url}")
                     feed = feedparser.parse(url)
+
                     if not feed.entries:
+                        print(f"   ⚠️ Нет новостей")
                         continue
 
                     latest = feed.entries[0]
                     link = latest.link
 
-                    if url in last_links and last_links[url] != link:
-                        print(f"🎉 Новая новость: {feed.feed.title}")
+                    print(f"   Последняя новость: {latest.title[:50]}...")
+
+                    # Проверяем есть ли уже эта ссылка
+                    if url not in last_links:
+                        print(f"   🆕 Первая проверка, сохраняем ссылку")
+                        last_links[url] = link
+                    elif last_links[url] != link:
+                        print(f"   🎉 ОБНАРУЖЕНА НОВАЯ НОВОСТЬ!")
+                        found_new_news = True
 
                         # Дата
                         if hasattr(latest, 'published_parsed') and latest.published_parsed:
@@ -208,12 +223,15 @@ def run_bot():
 
                         # Картинка
                         image_url = extract_image_from_entry(latest)
+                        if image_url:
+                            print(f"   🖼️ Найдена картинка: {image_url}")
 
                         # Источник
                         source_name = feed.feed.title if hasattr(feed.feed, 'title') else url
 
                         # Отправляем в Telegram
-                        send_to_telegram(
+                        print(f"   📤 Отправляю в Telegram...")
+                        success = send_to_telegram(
                             processed_title,
                             processed_description,
                             link,
@@ -223,10 +241,19 @@ def run_bot():
                             was_translated
                         )
 
-                        last_links[url] = link
+                        if success:
+                            last_links[url] = link
+                            print(f"   ✅ Успешно отправлено и ссылка сохранена")
+                        else:
+                            print(f"   ❌ Ошибка отправки, ссылка не сохранена")
+                    else:
+                        print(f"   ✅ Новостей нет (ссылка не изменилась)")
 
                 except Exception as e:
-                    print(f"💥 Ошибка: {url} - {e}")
+                    print(f"💥 Ошибка при проверке {url}: {e}")
+
+            if not found_new_news:
+                print(f"📭 Новых новостей не найдено в этой проверке")
 
             print(f"⏰ Ожидание 15 минут... ({datetime.now().strftime('%H:%M:%S')})")
             time.sleep(900)  # 15 минут
@@ -236,28 +263,5 @@ def run_bot():
             print("🔄 Перезапуск через 60 секунд...")
             time.sleep(60)
 
-# =============================================================================
-# FLASK APP (для поддержания активности)
-# =============================================================================
-
-@app.route('/')
-def home():
-    return """
-    <h1>🤖 Telegram RSS Bot</h1>
-    <p>Бот работает и мониторит новости!</p>
-    <p>Источников: {}</p>
-    <p>Время сервера: {}</p>
-    <p><a href="/ping">Проверить работу</a></p>
-    """.format(len(RSS_SOURCES), datetime.now().strftime("%H:%M:%S"))
-
-@app.route('/ping')
-def ping():
-    return "pong"
-
-# Запускаем бот в отдельном потоке
-bot_thread = threading.Thread(target=run_bot)
-bot_thread.daemon = True
-bot_thread.start()
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    main()
