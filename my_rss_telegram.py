@@ -6,6 +6,10 @@ import re
 import html
 from datetime import datetime
 import os
+from flask import Flask
+import threading
+
+app = Flask(__name__)
 
 # =============================================================================
 # НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
@@ -14,10 +18,8 @@ import os
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
 
-# Проверка что переменные установлены
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     print("❌ Ошибка: Не установлены TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID")
-    print("💡 Установите их в Environment Variables в Render")
     exit(1)
 
 RSS_SOURCES = [
@@ -39,7 +41,7 @@ RSS_SOURCES = [
 ]
 
 # =============================================================================
-# ФУНКЦИИ ПЕРЕВОДА
+# ФУНКЦИИ (без изменений)
 # =============================================================================
 
 def is_russian_text(text):
@@ -99,10 +101,6 @@ def prepare_news_content(title, description):
 
     return processed_title, processed_description, was_translated
 
-# =============================================================================
-# ФУНКЦИИ ДЛЯ КАРТИНОК
-# =============================================================================
-
 def extract_image_from_entry(entry):
     try:
         if hasattr(entry, 'links'):
@@ -118,10 +116,6 @@ def extract_image_from_entry(entry):
     except Exception as e:
         print(f"💥 Ошибка поиска картинки: {e}")
     return None
-
-# =============================================================================
-# ФУНКЦИЯ ОТПРАВКИ В TELEGRAM
-# =============================================================================
 
 def send_to_telegram(title, description, link, source_name, pub_date, image_url=None, was_translated=False):
     try:
@@ -166,7 +160,7 @@ def send_to_telegram(title, description, link, source_name, pub_date, image_url=
 # ОСНОВНОЙ ЦИКЛ БОТА
 # =============================================================================
 
-def main():
+def run_bot():
     last_links = {}
 
     print("🚀 Бот запущен и начинает мониторинг...")
@@ -234,13 +228,36 @@ def main():
                 except Exception as e:
                     print(f"💥 Ошибка: {url} - {e}")
 
-            print(f"⏰ Ожидание 30 минут... ({datetime.now().strftime('%H:%M:%S')})")
-            time.sleep(1800)  # 15 минут
+            print(f"⏰ Ожидание 15 минут... ({datetime.now().strftime('%H:%M:%S')})")
+            time.sleep(900)  # 15 минут
 
         except Exception as e:
             print(f"💥 Критическая ошибка в основном цикле: {e}")
             print("🔄 Перезапуск через 60 секунд...")
             time.sleep(60)
 
+# =============================================================================
+# FLASK APP (для поддержания активности)
+# =============================================================================
+
+@app.route('/')
+def home():
+    return """
+    <h1>🤖 Telegram RSS Bot</h1>
+    <p>Бот работает и мониторит новости!</p>
+    <p>Источников: {}</p>
+    <p>Время сервера: {}</p>
+    <p><a href="/ping">Проверить работу</a></p>
+    """.format(len(RSS_SOURCES), datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/ping')
+def ping():
+    return "pong"
+
+# Запускаем бот в отдельном потоке
+bot_thread = threading.Thread(target=run_bot)
+bot_thread.daemon = True
+bot_thread.start()
+
 if __name__ == '__main__':
-    main()
+    app.run(host='0.0.0.0', port=5000, debug=False)
