@@ -71,20 +71,36 @@ def get_favicon_url(domain):
         try:
             response = requests.head(url, timeout=5)
             if response.status_code == 200:
-                # Проверяем Content-Type чтобы убедиться что это изображение
                 content_type = response.headers.get('content-type', '').lower()
                 if any(img_type in content_type for img_type in ['image/png', 'image/jpeg', 'image/x-icon', 'image/vnd.microsoft.icon']):
                     print(f"✅ Найден favicon для {domain}: {url}")
                     favicon_cache[domain] = url
                     return url
-                else:
-                    print(f"⚠️ Найден файл, но не изображение: {url} ({content_type})")
         except Exception as e:
             continue
 
     print(f"❌ Favicon не найден для {domain}")
     favicon_cache[domain] = None
     return None
+
+def download_and_validate_favicon(favicon_url):
+    """Скачивает и проверяет favicon"""
+    try:
+        response = requests.get(favicon_url, timeout=10)
+        if response.status_code == 200:
+            # Проверяем размер файла (не должен быть слишком маленьким или большим)
+            content_length = len(response.content)
+            if 100 <= content_length <= 50000:  # от 100 байт до 50 КБ
+                # Проверяем что это изображение
+                if response.content[:4] in [b'\x89PNG', b'\xff\xd8\xff', b'GIF8', b'RIFF'] or response.content[:3] == b'\xff\xd8\xff':
+                    return response.content
+                # Для .ico файлов
+                elif favicon_url.endswith('.ico') and content_length > 0:
+                    return response.content
+        return None
+    except Exception as e:
+        print(f"💥 Ошибка загрузки favicon: {e}")
+        return None
 
 def get_site_icon(source_name, url):
     """Возвращает эмодзи для сайта (fallback)"""
@@ -244,11 +260,35 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
         message1 = f"<b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
 
         if favicon_url:
-            # Пробуем отправить favicon по URL
+            # Пробуем отправить favicon
             try:
-                # Сначала проверяем, доступна ли картинка
-                head_response = requests.head(favicon_url, timeout=5)
-                if head_response.status_code == 200:
+                # Скачиваем и проверяем favicon
+                favicon_data = download_and_validate_favicon(favicon_url)
+                if favicon_data:
+                    # Отправляем как файл
+                    files = {'photo': ('favicon.png', favicon_data, 'image/png')}
+                    data = {
+                        'chat_id': TELEGRAM_CHANNEL_ID,
+                        'caption': message1,
+                        'parse_mode': 'HTML'
+                    }
+
+                    url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+                    response1 = requests.post(url1, files=files, data=data, timeout=10)
+
+                    if response1.status_code == 200:
+                        print(f"   ✅ Favicon отправлен успешно (как файл)")
+                    else:
+                        # Если не получилось, пробуем по URL
+                        raise Exception(f"Favicon file upload failed: {response1.status_code}")
+                else:
+                    raise Exception("Favicon validation failed")
+
+            except Exception as e:
+                print(f"   ⚠️ Не удалось отправить favicon как файл: {e}")
+
+                # Пробуем отправить по URL (оригинальный метод)
+                try:
                     url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
                     data1 = {
                         'chat_id': TELEGRAM_CHANNEL_ID,
@@ -259,26 +299,23 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
 
                     response1 = requests.post(url1, data=data1, timeout=10)
                     if response1.status_code == 200:
-                        print(f"   ✅ Favicon отправлен успешно")
+                        print(f"   ✅ Favicon отправлен успешно (по URL)")
                     else:
-                        # Если ошибка, пробуем скачать и отправить как файл
-                        raise Exception(f"Favicon upload failed: {response1.status_code}")
-                else:
-                    raise Exception(f"Favicon not accessible: {head_response.status_code}")
+                        raise Exception(f"URL upload failed: {response1.status_code}")
 
-            except Exception as e:
-                print(f"   ⚠️ Не удалось отправить favicon: {e}")
-                # Fallback: текстовое сообщение с эмодзи
-                icon = get_site_icon(source_name, link)
-                message1_fallback = f"{icon} <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
-                url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                data1 = {
-                    'chat_id': TELEGRAM_CHANNEL_ID,
-                    'text': message1_fallback,
-                    'parse_mode': 'HTML',
-                    'disable_web_page_preview': True
-                }
-                response1 = requests.post(url1, data=data1, timeout=10)
+                except Exception as e2:
+                    print(f"   ⚠️ Не удалось отправить favicon по URL: {e2}")
+                    # Fallback: текстовое сообщение с эмодзи
+                    icon = get_site_icon(source_name, link)
+                    message1_fallback = f"{icon} <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
+                    url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                    data1 = {
+                        'chat_id': TELEGRAM_CHANNEL_ID,
+                        'text': message1_fallback,
+                        'parse_mode': 'HTML',
+                        'disable_web_page_preview': True
+                    }
+                    response1 = requests.post(url1, data=data1, timeout=10)
         else:
             # Fallback: текстовое сообщение с эмодзи
             icon = get_site_icon(source_name, link)
