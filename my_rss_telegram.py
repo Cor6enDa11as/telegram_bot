@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import feedparser
 import time
 import requests
@@ -179,11 +180,11 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
         favicon_url = get_favicon_url(domain)
 
         # 🔷 СООБЩЕНИЕ 1: Заголовок с иконкой сайта
+        message1 = f"<b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
+
         if favicon_url:
             # Пробуем отправить favicon по URL
             try:
-                message1 = f"<b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
-
                 url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
                 data1 = {
                     'chat_id': TELEGRAM_CHANNEL_ID,
@@ -202,11 +203,11 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
                 print(f"   ⚠️ Не удалось отправить favicon: {e}")
                 # Fallback: текстовое сообщение с эмодзи
                 icon = get_site_icon(source_name, link)
-                message1 = f"{icon} <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
+                message1_fallback = f"{icon} <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
                 url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                 data1 = {
                     'chat_id': TELEGRAM_CHANNEL_ID,
-                    'text': message1,
+                    'text': message1_fallback,
                     'parse_mode': 'HTML',
                     'disable_web_page_preview': True
                 }
@@ -214,11 +215,11 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
         else:
             # Fallback: текстовое сообщение с эмодзи
             icon = get_site_icon(source_name, link)
-            message1 = f"{icon} <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
+            message1_fallback = f"{icon} <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
             url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data1 = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
-                'text': message1,
+                'text': message1_fallback,
                 'parse_mode': 'HTML',
                 'disable_web_page_preview': True
             }
@@ -244,6 +245,10 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
         # Добавляем хэштег
         if hashtag:
             message2 += f"<code>{hashtag}</code>"
+
+        # Проверяем длину сообщения для Telegram API
+        if len(message2) > 1024:
+            message2 = message2[:1000] + "..."
 
         # Отправляем второе сообщение
         if image_url:
