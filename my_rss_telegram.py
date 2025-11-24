@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import feedparser
 import time
 import requests
@@ -8,6 +7,8 @@ from datetime import datetime
 import os
 from flask import Flask
 import threading
+from urllib.parse import urlparse
+import base64
 
 app = Flask(__name__)
 
@@ -22,23 +23,82 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     print("❌ Ошибка: Не установлены TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID")
     exit(1)
 
+# =============================================================================
+# RSS ЛЕНТЫ С ХЭШТЕГАМИ
+# =============================================================================
+
 RSS_SOURCES = [
-    "https://habr.com/ru/rss/hubs/linux_dev/articles/?fl=ru",
-    "https://habr.com/ru/rss/hubs/linux/articles/?fl=ru",
-    "https://habr.com/ru/rss/hubs/popular_science/articles/?fl=ru",
-    "https://habr.com/ru/rss/hubs/astronomy/articles/?fl=ru",
-    "https://habr.com/ru/rss/hubs/futurenow/articles/?fl=ru",
-    "https://habr.com/ru/rss/flows/popsci/articles/?fl=ru",
-    "https://4pda.to/feed/",
-    "https://tech.onliner.by/feed",
-    "https://www.ixbt.com/export/hardnews.rss",
-    "https://www.ixbt.com/export/sec_mobile.rss",
-    "https://www.ixbt.com/export/sec_cpu.rss",
-    "https://www.ixbt.com/export/applenews.rss",
-    "https://www.ixbt.com/export/softnews.rss",
-    "https://www.ixbt.com/export/sec_peripheral.rss",
-    "http://androidinsider.ru/feed"
+    {"url": "https://habr.com/ru/rss/hubs/linux_dev/articles/?fl=ru", "hashtag": "#linux"},
+    {"url": "https://habr.com/ru/rss/hubs/linux/articles/?fl=ru", "hashtag": "#linux"},
+    {"url": "https://habr.com/ru/rss/hubs/popular_science/articles/?fl=ru", "hashtag": "#наука"},
+    {"url": "https://habr.com/ru/rss/hubs/astronomy/articles/?fl=ru", "hashtag": "#астрономия"},
+    {"url": "https://habr.com/ru/rss/hubs/futurenow/articles/?fl=ru", "hashtag": "#технологии"},
+    {"url": "https://habr.com/ru/rss/flows/popsci/articles/?fl=ru", "hashtag": "#наука"},
+    {"url": "https://4pda.to/feed/", "hashtag": "#мобильные"},
+    {"url": "https://tech.onliner.by/feed", "hashtag": "#технологии"},
+    {"url": "https://www.ixbt.com/export/hardnews.rss", "hashtag": "#железо"},
+    {"url": "https://www.ixbt.com/export/sec_mobile.rss", "hashtag": "#мобильные"},
+    {"url": "https://www.ixbt.com/export/sec_cpu.rss", "hashtag": "#процессоры"},
+    {"url": "https://www.ixbt.com/export/applenews.rss", "hashtag": "#apple"},
+    {"url": "https://www.ixbt.com/export/softnews.rss", "hashtag": "#софт"},
+    {"url": "https://www.ixbt.com/export/sec_peripheral.rss", "hashtag": "#периферия"},
+    {"url": "http://androidinsider.ru/feed", "hashtag": "#android"}
 ]
+
+# =============================================================================
+# КЭШ ИКОНОК
+# =============================================================================
+
+favicon_cache = {}
+
+def get_favicon_url(domain):
+    """Получает URL favicon для домена"""
+    if domain in favicon_cache:
+        return favicon_cache[domain]
+
+    favicon_urls = [
+        f"https://{domain}/favicon.ico",
+        f"https://www.{domain}/favicon.ico",
+        f"https://{domain}/apple-touch-icon.png",
+        f"https://www.{domain}/apple-touch-icon.png",
+    ]
+
+    for url in favicon_urls:
+        try:
+            response = requests.head(url, timeout=5)
+            if response.status_code == 200:
+                print(f"✅ Найден favicon для {domain}: {url}")
+                favicon_cache[domain] = url
+                return url
+        except:
+            continue
+
+    print(f"❌ Favicon не найден для {domain}")
+    favicon_cache[domain] = None
+    return None
+
+def download_favicon_as_base64(favicon_url):
+    """Скачивает favicon и конвертирует в base64"""
+    try:
+        response = requests.get(favicon_url, timeout=10)
+        if response.status_code == 200:
+            # Конвертируем в base64
+            base64_data = base64.b64encode(response.content).decode('utf-8')
+
+            # Определяем MIME тип
+            content_type = response.headers.get('content-type', 'image/x-icon')
+            if 'png' in content_type:
+                mime_type = 'image/png'
+            elif 'jpeg' in content_type or 'jpg' in content_type:
+                mime_type = 'image/jpeg'
+            else:
+                mime_type = 'image/x-icon'
+
+            return f"data:{mime_type};base64,{base64_data}"
+    except Exception as e:
+        print(f"💥 Ошибка скачивания favicon: {e}")
+
+    return None
 
 # =============================================================================
 # ФУНКЦИИ
@@ -117,43 +177,107 @@ def extract_image_from_entry(entry):
         print(f"💥 Ошибка поиска картинки: {e}")
     return None
 
-def send_to_telegram(title, description, link, source_name, pub_date, image_url=None, was_translated=False):
+def send_split_news(title, description, link, source_name, pub_date, image_url=None, was_translated=False, hashtag=""):
+    """Отправляет новость в двух сообщениях с настоящей иконкой сайта"""
     try:
-        message = f"📰 **{source_name}**\n"
-        message += f"📅 **{pub_date}**\n\n"
-        if was_translated:
-            message += "🔤 *[Переведено]*\n\n"
-        message += f"**{title}**\n\n"
-        if description:
-            message += f"{description}\n\n"
-        message += f"🔗 [Читать полностью]({link})"
+        domain = urlparse(link).netloc
+        favicon_url = get_favicon_url(domain)
 
+        # 🔷 СООБЩЕНИЕ 1: Заголовок с иконкой сайта
+        if favicon_url:
+            # Скачиваем favicon как base64
+            favicon_base64 = download_favicon_as_base64(favicon_url)
+
+            if favicon_base64:
+                # Отправляем как фото с подписью (иконка + заголовок)
+                message1 = f"<b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
+
+                url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+                data1 = {
+                    'chat_id': TELEGRAM_CHANNEL_ID,
+                    'photo': favicon_base64,
+                    'caption': message1,
+                    'parse_mode': 'HTML'
+                }
+            else:
+                # Fallback: отправляем текстовое сообщение с эмодзи
+                message1 = f"📰 <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
+                url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                data1 = {
+                    'chat_id': TELEGRAM_CHANNEL_ID,
+                    'text': message1,
+                    'parse_mode': 'HTML',
+                    'disable_web_page_preview': True
+                }
+        else:
+            # Fallback: отправляем текстовое сообщение с эмодзи
+            message1 = f"📰 <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
+            url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data1 = {
+                'chat_id': TELEGRAM_CHANNEL_ID,
+                'text': message1,
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True
+            }
+
+        # Отправляем первое сообщение
+        response1 = requests.post(url1, data=data1, timeout=10)
+        if response1.status_code != 200:
+            print(f"❌ Ошибка отправки заголовка: {response1.status_code}")
+            return False
+
+        # Получаем ID первого сообщения для ответа
+        message_id = response1.json()['result']['message_id']
+
+        # 🔷 СООБЩЕНИЕ 2: Контент (картинка новости + описание + дата + хэштег)
+        message2 = ""
+        if was_translated:
+            message2 += "🔤 <i>[Переведено]</i>\n\n"
+
+        if description:
+            message2 += f"<i>{description}</i>\n\n"
+
+        message2 += f"📅 {pub_date}\n\n"
+
+        # Добавляем хэштег
+        if hashtag:
+            message2 += f"<code>{hashtag}</code>"
+
+        # Отправляем второе сообщение
         if image_url:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            data = {
+            # С картинкой новости
+            url2 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            data2 = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
                 'photo': image_url,
-                'caption': message,
-                'parse_mode': 'Markdown'
+                'caption': message2,
+                'parse_mode': 'HTML',
+                'reply_to_message_id': message_id
             }
         else:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            data = {
+            # Без картинки новости
+            url2 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data2 = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
-                'text': message,
-                'parse_mode': 'Markdown',
-                'disable_web_page_preview': False
+                'text': message2,
+                'parse_mode': 'HTML',
+                'reply_to_message_id': message_id,
+                'disable_web_page_preview': True
             }
 
-        response = requests.post(url, data=data, timeout=10)
-        if response.status_code == 200:
-            print(f"✅ Отправлено: {title[:50]}...")
+        # Небольшая задержка между сообщениями
+        time.sleep(0.5)
+
+        response2 = requests.post(url2, data=data2, timeout=10)
+        if response2.status_code == 200:
+            print(f"✅ Отправлено раздельное сообщение: {title[:50]}... {hashtag}")
             return True
         else:
-            print(f"❌ Ошибка Telegram: {response.status_code} - {response.text}")
+            print(f"❌ Ошибка отправки контента: {response2.status_code}")
             return False
+
     except Exception as e:
-        print(f"💥 Ошибка отправки: {e}")
+        print(f"💥 Ошибка отправки раздельного сообщения: {e}")
         return False
 
 # =============================================================================
@@ -167,15 +291,17 @@ def run_bot():
     print(f"📊 Источников: {len(RSS_SOURCES)}")
 
     # Первая инициализация
-    for url in RSS_SOURCES:
+    for source in RSS_SOURCES:
+        url = source["url"]
+        hashtag = source["hashtag"]
         try:
             feed = feedparser.parse(url)
             if feed.entries:
                 last_links[url] = feed.entries[0].link
-                print(f"✅ Инициализирован: {url}")
+                print(f"✅ Инициализирован: {url} {hashtag}")
                 print(f"   Первая новость: {feed.entries[0].title[:50]}...")
             else:
-                print(f"⚠️  Нет новостей в ленте: {url}")
+                print(f"⚠️  Нет новостей в ленте: {url} {hashtag}")
         except Exception as e:
             print(f"💥 Ошибка инициализации {url}: {e}")
 
@@ -188,9 +314,12 @@ def run_bot():
 
             found_new_news = False
 
-            for url in RSS_SOURCES:
+            for source in RSS_SOURCES:
+                url = source["url"]
+                hashtag = source["hashtag"]
+
                 try:
-                    print(f"📡 Проверяю: {url}")
+                    print(f"📡 Проверяю: {url} {hashtag}")
                     feed = feedparser.parse(url)
 
                     if not feed.entries:
@@ -207,7 +336,7 @@ def run_bot():
                         print(f"   🆕 Первая проверка, сохраняем ссылку")
                         last_links[url] = link
                     elif last_links[url] != link:
-                        print(f"   🎉 ОБНАРУЖЕНА НОВАЯ НОВОСТЬ!")
+                        print(f"   🎉 ОБНАРУЖЕНА НОВАЯ НОВОСТЬ! {hashtag}")
                         found_new_news = True
 
                         # Дата
@@ -225,33 +354,34 @@ def run_bot():
                             news_title, news_description
                         )
 
-                        # Картинка
+                        # Картинка новости
                         image_url = extract_image_from_entry(latest)
                         if image_url:
-                            print(f"   🖼️ Найдена картинка: {image_url}")
+                            print(f"   🖼️ Найдена картинка новости: {image_url}")
 
                         # Источник
-                        source_name = feed.feed.title if hasattr(feed.feed, 'title') else url
+                        source_name = feed.feed.title if hasattr(feed.feed, 'title') else urlparse(url).netloc
 
-                        # Отправляем в Telegram
-                        print(f"   📤 Отправляю в Telegram...")
-                        success = send_to_telegram(
+                        # Отправляем в Telegram (РАЗДЕЛЬНОЕ СООБЩЕНИЕ)
+                        print(f"   📤 Отправляю раздельное сообщение с иконкой сайта...")
+                        success = send_split_news(
                             processed_title,
                             processed_description,
                             link,
                             source_name,
                             formatted_date,
                             image_url,
-                            was_translated
+                            was_translated,
+                            hashtag
                         )
 
                         if success:
                             last_links[url] = link
-                            print(f"   ✅ Успешно отправлено и ссылка сохранена")
+                            print(f"   ✅ Успешно отправлено {hashtag}")
                         else:
-                            print(f"   ❌ Ошибка отправки, ссылка не сохранена")
+                            print(f"   ❌ Ошибка отправки {hashtag}")
                     else:
-                        print(f"   ✅ Новостей нет (ссылка не изменилась)")
+                        print(f"   ✅ Новостей нет {hashtag}")
 
                 except Exception as e:
                     print(f"💥 Ошибка при проверке {url}: {e}")
