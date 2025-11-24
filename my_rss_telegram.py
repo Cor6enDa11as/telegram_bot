@@ -8,7 +8,6 @@ import os
 from flask import Flask
 import threading
 from urllib.parse import urlparse
-import base64
 
 app = Flask(__name__)
 
@@ -61,6 +60,8 @@ def get_favicon_url(domain):
         f"https://www.{domain}/favicon.ico",
         f"https://{domain}/apple-touch-icon.png",
         f"https://www.{domain}/apple-touch-icon.png",
+        f"https://{domain}/apple-touch-icon-precomposed.png",
+        f"https://www.{domain}/apple-touch-icon-precomposed.png",
     ]
 
     for url in favicon_urls:
@@ -70,35 +71,29 @@ def get_favicon_url(domain):
                 print(f"✅ Найден favicon для {domain}: {url}")
                 favicon_cache[domain] = url
                 return url
-        except:
+        except Exception as e:
             continue
 
     print(f"❌ Favicon не найден для {domain}")
     favicon_cache[domain] = None
     return None
 
-def download_favicon_as_base64(favicon_url):
-    """Скачивает favicon и конвертирует в base64"""
-    try:
-        response = requests.get(favicon_url, timeout=10)
-        if response.status_code == 200:
-            # Конвертируем в base64
-            base64_data = base64.b64encode(response.content).decode('utf-8')
+def get_site_icon(source_name, url):
+    """Возвращает эмодзи для сайта (fallback)"""
+    domain_icons = {
+        'habr.com': '🐧',
+        '4pda.to': '📱',
+        'ixbt.com': '💻',
+        'onliner.by': '🏠',
+        'androidinsider.ru': '🤖',
+    }
 
-            # Определяем MIME тип
-            content_type = response.headers.get('content-type', 'image/x-icon')
-            if 'png' in content_type:
-                mime_type = 'image/png'
-            elif 'jpeg' in content_type or 'jpg' in content_type:
-                mime_type = 'image/jpeg'
-            else:
-                mime_type = 'image/x-icon'
+    domain = urlparse(url).netloc
+    for site_domain, icon in domain_icons.items():
+        if site_domain in domain:
+            return icon
 
-            return f"data:{mime_type};base64,{base64_data}"
-    except Exception as e:
-        print(f"💥 Ошибка скачивания favicon: {e}")
-
-    return None
+    return '📰'
 
 # =============================================================================
 # ФУНКЦИИ
@@ -185,23 +180,29 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
 
         # 🔷 СООБЩЕНИЕ 1: Заголовок с иконкой сайта
         if favicon_url:
-            # Скачиваем favicon как base64
-            favicon_base64 = download_favicon_as_base64(favicon_url)
-
-            if favicon_base64:
-                # Отправляем как фото с подписью (иконка + заголовок)
+            # Пробуем отправить favicon по URL
+            try:
                 message1 = f"<b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
 
                 url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
                 data1 = {
                     'chat_id': TELEGRAM_CHANNEL_ID,
-                    'photo': favicon_base64,
+                    'photo': favicon_url,
                     'caption': message1,
                     'parse_mode': 'HTML'
                 }
-            else:
-                # Fallback: отправляем текстовое сообщение с эмодзи
-                message1 = f"📰 <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
+
+                response1 = requests.post(url1, data=data1, timeout=10)
+                if response1.status_code != 200:
+                    raise Exception(f"Favicon upload failed: {response1.status_code}")
+
+                print(f"   ✅ Favicon отправлен успешно")
+
+            except Exception as e:
+                print(f"   ⚠️ Не удалось отправить favicon: {e}")
+                # Fallback: текстовое сообщение с эмодзи
+                icon = get_site_icon(source_name, link)
+                message1 = f"{icon} <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
                 url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                 data1 = {
                     'chat_id': TELEGRAM_CHANNEL_ID,
@@ -209,9 +210,11 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
                     'parse_mode': 'HTML',
                     'disable_web_page_preview': True
                 }
+                response1 = requests.post(url1, data=data1, timeout=10)
         else:
-            # Fallback: отправляем текстовое сообщение с эмодзи
-            message1 = f"📰 <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
+            # Fallback: текстовое сообщение с эмодзи
+            icon = get_site_icon(source_name, link)
+            message1 = f"{icon} <b>{source_name}</b>\n\n<b>{title}</b>\n\n🔗 {link}"
             url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data1 = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
@@ -219,11 +222,10 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
                 'parse_mode': 'HTML',
                 'disable_web_page_preview': True
             }
+            response1 = requests.post(url1, data=data1, timeout=10)
 
-        # Отправляем первое сообщение
-        response1 = requests.post(url1, data=data1, timeout=10)
         if response1.status_code != 200:
-            print(f"❌ Ошибка отправки заголовка: {response1.status_code}")
+            print(f"❌ Ошибка отправки заголовка: {response1.status_code} - {response1.text}")
             return False
 
         # Получаем ID первого сообщения для ответа
@@ -273,7 +275,7 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
             print(f"✅ Отправлено раздельное сообщение: {title[:50]}... {hashtag}")
             return True
         else:
-            print(f"❌ Ошибка отправки контента: {response2.status_code}")
+            print(f"❌ Ошибка отправки контента: {response2.status_code} - {response2.text}")
             return False
 
     except Exception as e:
