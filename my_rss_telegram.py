@@ -34,7 +34,7 @@ RSS_SOURCES = [
     {"url": "https://habr.com/ru/rss/hubs/astronomy/articles/?fl=ru", "hashtag": "#астрономия"},
     {"url": "https://habr.com/ru/rss/hubs/futurenow/articles/?fl=ru", "hashtag": "#технологии"},
     {"url": "https://habr.com/ru/rss/flows/popsci/articles/?fl=ru", "hashtag": "#наука"},
-    {"url": "https://4pda.to/feed/", "hashtag": "#мобильные"},
+    {"url": "https://4pda.to/feed/", "hashtag": "#мобильные", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
     {"url": "https://tech.onliner.by/feed", "hashtag": "#технологии"},
     {"url": "https://www.ixbt.com/export/hardnews.rss", "hashtag": "#железо"},
     {"url": "https://www.ixbt.com/export/sec_mobile.rss", "hashtag": "#мобильные"},
@@ -42,7 +42,7 @@ RSS_SOURCES = [
     {"url": "https://www.ixbt.com/export/applenews.rss", "hashtag": "#apple"},
     {"url": "https://www.ixbt.com/export/softnews.rss", "hashtag": "#софт"},
     {"url": "https://www.ixbt.com/export/sec_peripheral.rss", "hashtag": "#периферия"},
-    {"url": "http://androidinsider.ru/feed", "hashtag": "#android"}
+    {"url": "https://androidinsider.ru/feed", "hashtag": "#android"}
 ]
 
 # =============================================================================
@@ -52,13 +52,15 @@ RSS_SOURCES = [
 favicon_cache = {}
 
 def get_favicon_url(domain):
-    """Получает URL favicon для домена"""
+    """Получает URL favicon для домена с улучшенной проверкой"""
     if domain in favicon_cache:
         return favicon_cache[domain]
 
     favicon_urls = [
         f"https://{domain}/favicon.ico",
         f"https://www.{domain}/favicon.ico",
+        f"https://{domain}/favicon.png",
+        f"https://www.{domain}/favicon.png",
         f"https://{domain}/apple-touch-icon.png",
         f"https://www.{domain}/apple-touch-icon.png",
         f"https://{domain}/apple-touch-icon-precomposed.png",
@@ -69,9 +71,14 @@ def get_favicon_url(domain):
         try:
             response = requests.head(url, timeout=5)
             if response.status_code == 200:
-                print(f"✅ Найден favicon для {domain}: {url}")
-                favicon_cache[domain] = url
-                return url
+                # Проверяем Content-Type чтобы убедиться что это изображение
+                content_type = response.headers.get('content-type', '').lower()
+                if any(img_type in content_type for img_type in ['image/png', 'image/jpeg', 'image/x-icon', 'image/vnd.microsoft.icon']):
+                    print(f"✅ Найден favicon для {domain}: {url}")
+                    favicon_cache[domain] = url
+                    return url
+                else:
+                    print(f"⚠️ Найден файл, но не изображение: {url} ({content_type})")
         except Exception as e:
             continue
 
@@ -99,6 +106,31 @@ def get_site_icon(source_name, url):
 # =============================================================================
 # ФУНКЦИИ
 # =============================================================================
+
+def parse_feed_with_retry(url, user_agent=None):
+    """Парсит RSS с повторными попытками и кастомным User-Agent"""
+    headers = {}
+    if user_agent:
+        headers['User-Agent'] = user_agent
+
+    try:
+        if headers:
+            response = requests.get(url, headers=headers, timeout=10)
+            content = response.content
+            feed = feedparser.parse(content)
+        else:
+            feed = feedparser.parse(url)
+
+        return feed
+    except Exception as e:
+        print(f"💥 Ошибка парсинга {url}: {e}")
+        # Попробуем без кастомного User-Agent
+        try:
+            feed = feedparser.parse(url)
+            return feed
+        except Exception as e2:
+            print(f"💥 Вторая ошибка парсинга {url}: {e2}")
+            return feedparser.parse("")  # Возвращаем пустой фид
 
 def is_russian_text(text):
     if not text:
@@ -158,19 +190,48 @@ def prepare_news_content(title, description):
     return processed_title, processed_description, was_translated
 
 def extract_image_from_entry(entry):
+    """Улучшенный поиск картинок в RSS записи"""
     try:
+        # 1. Проверяем медиа-контент
         if hasattr(entry, 'links'):
             for link in entry.links:
                 if 'image' in link.type:
                     return link.href
-        if hasattr(entry, 'summary'):
-            img_match = re.search(r'<img[^>]+src="([^">]+)"', entry.summary)
-            if img_match:
-                return img_match.group(1)
+                if hasattr(link, 'rel') and 'icon' in link.rel:
+                    return link.href
+
+        # 2. Проверяем summary/content на наличие img тегов
+        content_fields = ['summary', 'content', 'description']
+        for field in content_fields:
+            if hasattr(entry, field):
+                content = getattr(entry, field)
+                if isinstance(content, list):
+                    content = content[0].value if content else ""
+
+                img_match = re.search(r'<img[^>]+src="([^">]+)"', content)
+                if img_match:
+                    img_url = img_match.group(1)
+                    # Проверяем что это действительно картинка
+                    if any(ext in img_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                        return img_url
+
+        # 3. Проверяем медиа-thumbnail
         if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
             return entry.media_thumbnail[0]['url']
+
+        # 4. Для Habr: пытаемся найти картинку в содержании
+        if hasattr(entry, 'content') and entry.content:
+            for content_item in entry.content:
+                if hasattr(content_item, 'value'):
+                    img_match = re.search(r'<img[^>]+src="([^">]+)"', content_item.value)
+                    if img_match:
+                        img_url = img_match.group(1)
+                        if any(ext in img_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                            return img_url
+
     except Exception as e:
         print(f"💥 Ошибка поиска картинки: {e}")
+
     return None
 
 def send_split_news(title, description, link, source_name, pub_date, image_url=None, was_translated=False, hashtag=""):
@@ -185,19 +246,25 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
         if favicon_url:
             # Пробуем отправить favicon по URL
             try:
-                url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-                data1 = {
-                    'chat_id': TELEGRAM_CHANNEL_ID,
-                    'photo': favicon_url,
-                    'caption': message1,
-                    'parse_mode': 'HTML'
-                }
+                # Сначала проверяем, доступна ли картинка
+                head_response = requests.head(favicon_url, timeout=5)
+                if head_response.status_code == 200:
+                    url1 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+                    data1 = {
+                        'chat_id': TELEGRAM_CHANNEL_ID,
+                        'photo': favicon_url,
+                        'caption': message1,
+                        'parse_mode': 'HTML'
+                    }
 
-                response1 = requests.post(url1, data=data1, timeout=10)
-                if response1.status_code != 200:
-                    raise Exception(f"Favicon upload failed: {response1.status_code}")
-
-                print(f"   ✅ Favicon отправлен успешно")
+                    response1 = requests.post(url1, data=data1, timeout=10)
+                    if response1.status_code == 200:
+                        print(f"   ✅ Favicon отправлен успешно")
+                    else:
+                        # Если ошибка, пробуем скачать и отправить как файл
+                        raise Exception(f"Favicon upload failed: {response1.status_code}")
+                else:
+                    raise Exception(f"Favicon not accessible: {head_response.status_code}")
 
             except Exception as e:
                 print(f"   ⚠️ Не удалось отправить favicon: {e}")
@@ -252,15 +319,36 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
 
         # Отправляем второе сообщение
         if image_url:
-            # С картинкой новости
-            url2 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            data2 = {
-                'chat_id': TELEGRAM_CHANNEL_ID,
-                'photo': image_url,
-                'caption': message2,
-                'parse_mode': 'HTML',
-                'reply_to_message_id': message_id
-            }
+            # Проверяем валидность URL картинки
+            try:
+                # С картинкой новости
+                url2 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+                data2 = {
+                    'chat_id': TELEGRAM_CHANNEL_ID,
+                    'photo': image_url,
+                    'caption': message2,
+                    'parse_mode': 'HTML',
+                    'reply_to_message_id': message_id
+                }
+
+                response2 = requests.post(url2, data=data2, timeout=10)
+                if response2.status_code != 200:
+                    print(f"   ⚠️ Не удалось отправить с картинкой: {response2.text}")
+                    # Fallback: отправляем без картинки
+                    raise Exception("Image send failed")
+
+            except Exception as e:
+                print(f"   ⚠️ Ошибка отправки картинки: {e}")
+                # Fallback: отправляем текстовое сообщение
+                url2 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                data2 = {
+                    'chat_id': TELEGRAM_CHANNEL_ID,
+                    'text': message2,
+                    'parse_mode': 'HTML',
+                    'reply_to_message_id': message_id,
+                    'disable_web_page_preview': True
+                }
+                response2 = requests.post(url2, data=data2, timeout=10)
         else:
             # Без картинки новости
             url2 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -271,11 +359,11 @@ def send_split_news(title, description, link, source_name, pub_date, image_url=N
                 'reply_to_message_id': message_id,
                 'disable_web_page_preview': True
             }
+            response2 = requests.post(url2, data=data2, timeout=10)
 
         # Небольшая задержка между сообщениями
         time.sleep(0.5)
 
-        response2 = requests.post(url2, data=data2, timeout=10)
         if response2.status_code == 200:
             print(f"✅ Отправлено раздельное сообщение: {title[:50]}... {hashtag}")
             return True
@@ -301,14 +389,22 @@ def run_bot():
     for source in RSS_SOURCES:
         url = source["url"]
         hashtag = source["hashtag"]
+        user_agent = source.get("user_agent")
+
         try:
-            feed = feedparser.parse(url)
+            print(f"🔧 Инициализация: {url} {hashtag}")
+            feed = parse_feed_with_retry(url, user_agent)
+
             if feed.entries:
                 last_links[url] = feed.entries[0].link
                 print(f"✅ Инициализирован: {url} {hashtag}")
                 print(f"   Первая новость: {feed.entries[0].title[:50]}...")
+                print(f"   Количество новостей: {len(feed.entries)}")
             else:
                 print(f"⚠️  Нет новостей в ленте: {url} {hashtag}")
+                print(f"   Статус фида: {feed.get('status', 'N/A')}")
+                if feed.get('bozo'):
+                    print(f"   Ошибка парсинга: {feed.bozo_exception}")
         except Exception as e:
             print(f"💥 Ошибка инициализации {url}: {e}")
 
@@ -324,19 +420,23 @@ def run_bot():
             for source in RSS_SOURCES:
                 url = source["url"]
                 hashtag = source["hashtag"]
+                user_agent = source.get("user_agent")
 
                 try:
                     print(f"📡 Проверяю: {url} {hashtag}")
-                    feed = feedparser.parse(url)
+                    feed = parse_feed_with_retry(url, user_agent)
 
                     if not feed.entries:
-                        print(f"   ⚠️ Нет новостей")
+                        print(f"   ⚠️ Нет новостей в фиде")
+                        if feed.get('bozo'):
+                            print(f"   Ошибка парсинга: {feed.bozo_exception}")
                         continue
 
                     latest = feed.entries[0]
                     link = latest.link
 
                     print(f"   Последняя новость: {latest.title[:50]}...")
+                    print(f"   Всего новостей в фиде: {len(feed.entries)}")
 
                     # Проверяем есть ли уже эта ссылка
                     if url not in last_links:
@@ -350,6 +450,9 @@ def run_bot():
                         if hasattr(latest, 'published_parsed') and latest.published_parsed:
                             pub_date = datetime(*latest.published_parsed[:6])
                             formatted_date = pub_date.strftime("%d.%m.%Y %H:%M")
+                        elif hasattr(latest, 'updated_parsed') and latest.updated_parsed:
+                            pub_date = datetime(*latest.updated_parsed[:6])
+                            formatted_date = pub_date.strftime("%d.%m.%Y %H:%M")
                         else:
                             formatted_date = "Дата неизвестна"
 
@@ -361,10 +464,12 @@ def run_bot():
                             news_title, news_description
                         )
 
-                        # Картинка новости
+                        # Картинка новости (улучшенный поиск)
                         image_url = extract_image_from_entry(latest)
                         if image_url:
                             print(f"   🖼️ Найдена картинка новости: {image_url}")
+                        else:
+                            print(f"   📄 Картинка новости не найдена")
 
                         # Источник
                         source_name = feed.feed.title if hasattr(feed.feed, 'title') else urlparse(url).netloc
