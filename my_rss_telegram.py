@@ -48,7 +48,7 @@ RSS_SOURCES = [
 ]
 
 def parse_feed(url):
-    """Парсит RSS с поддержкой windows-1251"""
+    """Парсит RSS с улучшенной обработкой ошибок"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/rss+xml, application/xml, text/xml'
@@ -65,7 +65,19 @@ def parse_feed(url):
             except:
                 pass
 
-        return feedparser.parse(content)
+        # Парсим с игнорированием ошибок
+        feed = feedparser.parse(content)
+
+        # Если есть ошибки парсинга, но есть записи - все равно используем
+        if feed.bozo and feed.entries:
+            print(f"   ⚠️ Есть ошибки парсинга, но новости найдены: {feed.bozo_exception}")
+            return feed
+        elif feed.entries:
+            return feed
+        else:
+            print(f"   ❌ Нет новостей в фиде")
+            return feedparser.parse("")
+
     except Exception as e:
         print(f"💥 Ошибка парсинга {url}: {e}")
         return feedparser.parse("")
@@ -100,9 +112,15 @@ def prepare_news_content(title, description):
 
     processed_description = ""
     if description:
+        # Более агрессивная очистка HTML тегов
         clean_desc = re.sub('<[^<]+?>', '', description)
         clean_desc = html.unescape(clean_desc)
         clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
+
+        # Удаляем возможные остатки битых тегов
+        clean_desc = re.sub(r'<[^>]*$', '', clean_desc)  # удаляем незакрытые теги в конце
+        clean_desc = re.sub(r'^[^<]*>', '', clean_desc)  # удаляем незакрытые теги в начале
+
         if len(clean_desc) > 400:
             clean_desc = clean_desc[:400] + "..."
         if not is_russian_text(clean_desc) and clean_desc.strip():
@@ -118,15 +136,15 @@ def prepare_news_content(title, description):
     return processed_title, processed_description, was_translated
 
 def extract_image_from_entry(entry):
-    """Поиск картинок в RSS записи"""
+    """Улучшенный поиск картинок в RSS записи"""
     try:
-        # Проверяем медиа-контент
+        # 1. Проверяем медиа-контент
         if hasattr(entry, 'links'):
             for link in entry.links:
                 if 'image' in link.type:
                     return link.href
 
-        # Ищем img теги в контенте
+        # 2. Ищем img теги в контенте
         content_fields = ['summary', 'content', 'description']
         for field in content_fields:
             if hasattr(entry, field):
@@ -135,14 +153,31 @@ def extract_image_from_entry(entry):
                     content = content[0].value if content else ""
                 img_match = re.search(r'<img[^>]+src="([^">]+)"', content)
                 if img_match:
-                    return img_match.group(1)
+                    img_url = img_match.group(1)
+                    # Проверяем что это действительно картинка
+                    if any(ext in img_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                        return img_url
 
-        # Проверяем медиа-thumbnail
+        # 3. Проверяем медиа-thumbnail
         if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
             return entry.media_thumbnail[0]['url']
 
-    except Exception:
-        pass
+        # 4. Для Rozetked: ищем в enclosure
+        if hasattr(entry, 'enclosures'):
+            for enclosure in entry.enclosures:
+                if 'image' in enclosure.type:
+                    return enclosure.href
+
+        # 5. Ищем в content:encoded если есть
+        if hasattr(entry, 'content_encoded'):
+            img_match = re.search(r'<img[^>]+src="([^">]+)"', entry.content_encoded)
+            if img_match:
+                img_url = img_match.group(1)
+                if any(ext in img_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                    return img_url
+
+    except Exception as e:
+        print(f"💥 Ошибка поиска картинки: {e}")
 
     return None
 
@@ -150,19 +185,24 @@ def create_news_message(domain, title, description, link, pub_date, was_translat
     """Создает сообщение с markdown разметкой"""
     message_parts = [
         f"🌐 {domain}",
-        f"📢 **{title}**",
+        "",  # Пробел после источника
+        f"📢 *{title}*",
     ]
 
     if description:
-        message_parts.append("")  # Пустая строка для разделения
-        message_parts.append(f"📝 *{description}*")
+        message_parts.append("")  # Пробел перед описанием
+        message_parts.append(f"📝 **{description}**")
 
     message_parts.extend([
-        "",
+        "",  # Пробел перед ссылкой
         f"🔗 [Читать]({link})",
+        "",  # Пробел перед датой
         f"📅 {pub_date}",
-        f"🏷️ {hashtag}" if hashtag else f"📅 {pub_date}"
     ])
+
+    if hashtag:
+        message_parts.append("")  # Пробел перед хэштегом
+        message_parts.append(f"🏷️ {hashtag}")
 
     if was_translated:
         message_parts.append("\n`🔤 [Переведено]`")
@@ -215,6 +255,8 @@ def run_bot():
             if feed.entries:
                 last_links[url] = feed.entries[0].link
                 print(f"✅ {urlparse(url).netloc} {hashtag}")
+            elif feed.bozo:
+                print(f"⚠️  Ошибка парсинга {url}: {feed.bozo_exception}")
         except Exception as e:
             print(f"💥 Ошибка {url}: {e}")
 
@@ -250,6 +292,10 @@ def run_bot():
                         )
 
                         image_url = extract_image_from_entry(latest)
+                        if image_url:
+                            print(f"   🖼️ Найдена картинка новости")
+                        else:
+                            print(f"   📄 Картинка новости не найдена")
 
                         # Отправка
                         if send_news_message(title, description, link, pub_date, image_url, was_translated, hashtag):
