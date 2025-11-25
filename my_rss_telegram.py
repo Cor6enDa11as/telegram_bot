@@ -118,8 +118,8 @@ def prepare_news_content(title, description):
         clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
 
         # Удаляем возможные остатки битых тегов
-        clean_desc = re.sub(r'<[^>]*$', '', clean_desc)  # удаляем незакрытые теги в конце
-        clean_desc = re.sub(r'^[^<]*>', '', clean_desc)  # удаляем незакрытые теги в начале
+        clean_desc = re.sub(r'<[^>]*$', '', clean_desc)
+        clean_desc = re.sub(r'^[^<]*>', '', clean_desc)
 
         if len(clean_desc) > 400:
             clean_desc = clean_desc[:400] + "..."
@@ -138,43 +138,49 @@ def prepare_news_content(title, description):
 def extract_image_from_entry(entry):
     """Улучшенный поиск картинок в RSS записи"""
     try:
-        # 1. Проверяем медиа-контент
+        # 1. Проверяем медиа-контент (для Phoronix и других)
         if hasattr(entry, 'links'):
             for link in entry.links:
                 if 'image' in link.type:
                     return link.href
+                # Для enclosure ссылок
+                if hasattr(link, 'rel') and 'enclosure' in link.rel:
+                    if 'image' in getattr(link, 'type', ''):
+                        return link.href
 
-        # 2. Ищем img теги в контенте
-        content_fields = ['summary', 'content', 'description']
-        for field in content_fields:
-            if hasattr(entry, field):
-                content = getattr(entry, field)
-                if isinstance(content, list):
-                    content = content[0].value if content else ""
-                img_match = re.search(r'<img[^>]+src="([^">]+)"', content)
-                if img_match:
-                    img_url = img_match.group(1)
-                    # Проверяем что это действительно картинка
-                    if any(ext in img_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                        return img_url
+        # 2. Проверяем медиа-контент по стандарту Media RSS
+        if hasattr(entry, 'media_content'):
+            for media in entry.media_content:
+                if media.get('type', '').startswith('image/'):
+                    return media['url']
 
         # 3. Проверяем медиа-thumbnail
         if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
             return entry.media_thumbnail[0]['url']
 
-        # 4. Для Rozetked: ищем в enclosure
+        # 4. Ищем в summary/content
+        content_fields = ['summary', 'content', 'description', 'content_encoded']
+        for field in content_fields:
+            if hasattr(entry, field):
+                content = getattr(entry, field)
+                if isinstance(content, list):
+                    content = content[0].value if content else ""
+                if content:
+                    img_match = re.search(r'<img[^>]+src="([^">]+)"', content)
+                    if img_match:
+                        img_url = img_match.group(1)
+                        if any(ext in img_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                            return img_url
+
+        # 5. Проверяем enclosures
         if hasattr(entry, 'enclosures'):
             for enclosure in entry.enclosures:
-                if 'image' in enclosure.type:
+                if 'image' in getattr(enclosure, 'type', ''):
                     return enclosure.href
 
-        # 5. Ищем в content:encoded если есть
-        if hasattr(entry, 'content_encoded'):
-            img_match = re.search(r'<img[^>]+src="([^">]+)"', entry.content_encoded)
-            if img_match:
-                img_url = img_match.group(1)
-                if any(ext in img_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                    return img_url
+        # 6. Для Phoronix: проверяем дополнительные поля
+        if hasattr(entry, 'phoronix_image'):
+            return entry.phoronix_image
 
     except Exception as e:
         print(f"💥 Ошибка поиска картинки: {e}")
@@ -186,12 +192,12 @@ def create_news_message(domain, title, description, link, pub_date, was_translat
     message_parts = [
         f"🌐 {domain}",
         "",  # Пробел после источника
-        f"📢 *{title}*",
+        f"📢 **{title}**",
     ]
 
     if description:
         message_parts.append("")  # Пробел перед описанием
-        message_parts.append(f"📝 **{description}**")
+        message_parts.append(f"📝 *{description}*")
 
     message_parts.extend([
         "",  # Пробел перед ссылкой
@@ -205,7 +211,8 @@ def create_news_message(domain, title, description, link, pub_date, was_translat
         message_parts.append(f"🏷️ {hashtag}")
 
     if was_translated:
-        message_parts.append("\n`🔤 [Переведено]`")
+        message_parts.append("")  # Пробел перед отметкой перевода
+        message_parts.append("`🔤 [Переведено]`")
 
     return "\n".join(message_parts)
 
@@ -215,7 +222,9 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
         domain = urlparse(link).netloc.replace('www.', '')
         message_text = create_news_message(domain, title, description, link, pub_date, was_translated, hashtag)
 
+        # Всегда разрешаем предпросмотр страницы - Telegram сам добавит картинку если нужно
         if image_url:
+            # Пробуем отправить с картинкой из RSS
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             data = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
@@ -223,15 +232,29 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
                 'caption': message_text,
                 'parse_mode': 'Markdown'
             }
+            response = requests.post(url, data=data, timeout=10)
+
+            # Если не получилось с картинкой, отправляем текстовое сообщение
+            if response.status_code != 200:
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                data = {
+                    'chat_id': TELEGRAM_CHANNEL_ID,
+                    'text': message_text,
+                    'parse_mode': 'Markdown',
+                    'disable_web_page_preview': False  # Разрешаем предпросмотр
+                }
+                response = requests.post(url, data=data, timeout=10)
         else:
+            # Отправляем текстовое сообщение с разрешенным предпросмотром
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
                 'text': message_text,
-                'parse_mode': 'Markdown'
+                'parse_mode': 'Markdown',
+                'disable_web_page_preview': False  # ВКЛЮЧАЕМ предпросмотр страницы
             }
+            response = requests.post(url, data=data, timeout=10)
 
-        response = requests.post(url, data=data, timeout=10)
         if response.status_code == 200:
             print(f"✅ Отправлено: {title[:50]}... {hashtag}")
             return True
@@ -293,9 +316,9 @@ def run_bot():
 
                         image_url = extract_image_from_entry(latest)
                         if image_url:
-                            print(f"   🖼️ Найдена картинка новости")
+                            print(f"   🖼️ Найдена картинка в RSS")
                         else:
-                            print(f"   📄 Картинка новости не найдена")
+                            print(f"   📄 Картинка в RSS не найдена (Telegram добавит свою)")
 
                         # Отправка
                         if send_news_message(title, description, link, pub_date, image_url, was_translated, hashtag):
