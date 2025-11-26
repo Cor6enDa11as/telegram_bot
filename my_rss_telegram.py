@@ -174,7 +174,6 @@ def extract_image_from_entry(entry):
 def check_site_supports_preview(link):
     """Проверяет, поддерживает ли сайт Telegram превью"""
     try:
-        # Проверяем основные meta-теги для превью
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml'
@@ -183,7 +182,6 @@ def check_site_supports_preview(link):
         response = requests.get(link, headers=headers, timeout=5)
         content = response.text
 
-        # Проверяем наличие основных meta-тегов для превью
         has_og_image = 'property="og:image"' in content or 'property=\'og:image\'' in content
         has_og_title = 'property="og:title"' in content or 'property=\'og:title\'' in content
         has_twitter_image = 'name="twitter:image"' in content or 'name=\'twitter:image\'' in content
@@ -201,9 +199,12 @@ def check_site_supports_preview(link):
         print(f"   ⚠️ Не удалось проверить превью: {e}")
         return False
 
-def create_preview_message(pub_date, hashtag, was_translated):
-    """Создает минимальное сообщение для превью (только дата и хэштег)"""
+def create_preview_message(link, pub_date, hashtag, was_translated):
+    """Создает сообщение для превью со ссылкой"""
     message_parts = []
+
+    # Добавляем красивую ссылку "Читать"
+    message_parts.append(f"🔗 [Читать]({link})")
 
     message_parts.extend([
         "",
@@ -225,12 +226,12 @@ def create_full_message(domain, title, description, link, pub_date, was_translat
     message_parts = [
         f"🌐 {domain}",
         "",
-        f"📢 **{title}**",
+        f"*{title}*",  # Курсив для заголовка
     ]
 
     if description:
         message_parts.append("")
-        message_parts.append(f"📝 *{description}*")
+        message_parts.append(f"_{description}_")  # Курсив для описания
 
     message_parts.extend([
         "",
@@ -255,44 +256,53 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
         domain = urlparse(link).netloc.replace('www.', '')
 
         # УМНАЯ ЛОГИКА ВЫБОРА ФОРМАТА:
-        # 1. Проверяем поддержку превью
         supports_preview = check_site_supports_preview(link)
 
-        # 2. Выбираем формат на основе проверки и перевода
         if not was_translated and supports_preview:
             # Telegram превью: русскоязычный + поддерживает превью
-            message_text = create_preview_message(pub_date, hashtag, was_translated)
+            message_text = create_preview_message(link, pub_date, hashtag, was_translated)
             disable_preview = False  # Разрешаем превью
-            use_photo = False
-            print(f"   📱 Использую Telegram превью")
-        else:
-            # Полное сообщение: либо переведенное, либо не поддерживает превью
-            message_text = create_full_message(domain, title, description, link, pub_date, was_translated, hashtag)
-            disable_preview = True  # Запрещаем превью
-            use_photo = bool(image_url)
-            if was_translated:
-                print(f"   🎨 Использую полное сообщение (перевод)")
-            else:
-                print(f"   🎨 Использую полное сообщение (нет превью)")
 
-        if use_photo and image_url:
-            # Отправляем с картинкой из RSS
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            data = {
-                'chat_id': TELEGRAM_CHANNEL_ID,
-                'photo': image_url,
-                'caption': message_text,
-                'parse_mode': 'Markdown'
-            }
-        else:
-            # Текстовое сообщение
+            # Отправляем одно сообщение с ссылкой и превью
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
                 'text': message_text,
                 'parse_mode': 'Markdown',
-                'disable_web_page_preview': disable_preview
+                'disable_web_page_preview': False  # Разрешаем превью
             }
+
+            print(f"   📱 Использую Telegram превью")
+
+        else:
+            # Полное сообщение: либо переведенное, либо не поддерживает превью
+            message_text = create_full_message(domain, title, description, link, pub_date, was_translated, hashtag)
+            disable_preview = True  # Запрещаем превью
+            use_photo = bool(image_url)
+
+            if use_photo and image_url:
+                # Отправляем с картинкой из RSS
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+                data = {
+                    'chat_id': TELEGRAM_CHANNEL_ID,
+                    'photo': image_url,
+                    'caption': message_text,
+                    'parse_mode': 'Markdown'
+                }
+            else:
+                # Текстовое сообщение
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                data = {
+                    'chat_id': TELEGRAM_CHANNEL_ID,
+                    'text': message_text,
+                    'parse_mode': 'Markdown',
+                    'disable_web_page_preview': disable_preview
+                }
+
+            if was_translated:
+                print(f"   🎨 Использую полное сообщение (перевод)")
+            else:
+                print(f"   🎨 Использую полное сообщение (нет превью)")
 
         response = requests.post(url, data=data, timeout=10)
 
