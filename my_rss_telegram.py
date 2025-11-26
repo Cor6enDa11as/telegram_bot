@@ -41,7 +41,7 @@ RSS_SOURCES = [
     {"url": "https://www.gamingonlinux.com/article_rss.php", "hashtag": "#linux"},
     {"url": "https://itsfoss.com/feed/", "hashtag": "#linux"},
     {"url": "https://www.omgubuntu.co.uk/feed/", "hashtag": "#linux"},
-    {"url": "https://rozetked.me/turbo", "hashtag": "#технологии"},
+    {"url": "https://rozetked.me/rss.xml", "hashtag": "#технологии"},
     {"url": "https://mobile-review.com/all/news/feed/", "hashtag": "#android"},
     {"url": "https://droider.ru/feed", "hashtag": "#технологии"},
     {"url": "https://www.comss.ru/linux.php", "hashtag": "#linux"},
@@ -203,8 +203,8 @@ def create_preview_message(link, pub_date, hashtag, was_translated):
     """Создает сообщение для превью со ссылкой"""
     message_parts = []
 
-    # Добавляем красивую ссылку "Читать"
-    message_parts.append(f"🔗 [Читать]({link})")
+    # Для превью ссылка должна быть отдельным элементом
+    message_parts.append(link)  # Просто ссылка для превью
 
     message_parts.extend([
         "",
@@ -217,7 +217,7 @@ def create_preview_message(link, pub_date, hashtag, was_translated):
 
     if was_translated:
         message_parts.append("")
-        message_parts.append("`🔤 [Переведено]`")
+        message_parts.append("🔤 [Переведено]")
 
     return "\n".join(message_parts)
 
@@ -226,16 +226,16 @@ def create_full_message(domain, title, description, link, pub_date, was_translat
     message_parts = [
         f"🌐 {domain}",
         "",
-        f"*{title}*",  # Курсив для заголовка
+        f"*{title}*",
     ]
 
     if description:
         message_parts.append("")
-        message_parts.append(f"_{description}_")  # Курсив для описания
+        message_parts.append(f"_{description}_")
 
     message_parts.extend([
         "",
-        f"🔗 [Читать]({link})",
+        f"🔗 {link}",  # Просто ссылка
         "",
         f"📅 {pub_date}",
     ])
@@ -246,7 +246,7 @@ def create_full_message(domain, title, description, link, pub_date, was_translat
 
     if was_translated:
         message_parts.append("")
-        message_parts.append("`🔤 [Переведено]`")
+        message_parts.append("🔤 [Переведено]")
 
     return "\n".join(message_parts)
 
@@ -261,14 +261,13 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
         if not was_translated and supports_preview:
             # Telegram превью: русскоязычный + поддерживает превью
             message_text = create_preview_message(link, pub_date, hashtag, was_translated)
-            disable_preview = False  # Разрешаем превью
 
-            # Отправляем одно сообщение с ссылкой и превью
+            # Отправляем без Markdown, чтобы ссылка была распознана для превью
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
                 'text': message_text,
-                'parse_mode': 'Markdown',
+                'parse_mode': None,  # Без Markdown для превью
                 'disable_web_page_preview': False  # Разрешаем превью
             }
 
@@ -277,7 +276,6 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
         else:
             # Полное сообщение: либо переведенное, либо не поддерживает превью
             message_text = create_full_message(domain, title, description, link, pub_date, was_translated, hashtag)
-            disable_preview = True  # Запрещаем превью
             use_photo = bool(image_url)
 
             if use_photo and image_url:
@@ -296,7 +294,7 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
                     'chat_id': TELEGRAM_CHANNEL_ID,
                     'text': message_text,
                     'parse_mode': 'Markdown',
-                    'disable_web_page_preview': disable_preview
+                    'disable_web_page_preview': True  # Запрещаем превью
                 }
 
             if was_translated:
