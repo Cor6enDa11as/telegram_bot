@@ -9,6 +9,7 @@ import os
 from flask import Flask
 import threading
 from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
@@ -45,6 +46,8 @@ RSS_SOURCES = [
     {"url": "https://mobile-review.com/all/news/feed/", "hashtag": "#android"},
     {"url": "https://droider.ru/feed", "hashtag": "#технологии"},
     {"url": "https://www.comss.ru/linux.php", "hashtag": "#linux"},
+    {"url": "https://rss-bridge.org/bridge01/?action=display&bridge=YouTubeFeedExpanderBridge&channel=UCt75WMud0RMUivGBNzvBPXQ&embed=on&format=Mrss" , "hashtag": "#Польза NET"},
+    {"url": "https://rss-bridge.org/bridge01/?action=display&bridge=TelegramBridge&username=%40prohitec&format=Mrss" , "hashtag": "#PRO Hi-Tech"},
 ]
 
 def parse_feed(url):
@@ -167,8 +170,92 @@ def extract_image_from_entry(entry):
                     return enclosure.href
 
     except Exception as e:
-        print(f"💥 Ошибка поиска картинки: {e}")
+        print(f"💥 Ошибка поиска картинки в RSS: {e}")
 
+    return None
+
+def extract_image_from_page(link):
+    """Парсит главную картинку со страницы новости"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml'
+        }
+
+        response = requests.get(link, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Сначала ищем в meta-тегах (самые надежные)
+        meta_selectors = [
+            'meta[property="og:image"]',
+            'meta[name="twitter:image"]',
+            'meta[property="og:image:url"]',
+            'link[rel="image_src"]'
+        ]
+
+        for selector in meta_selectors:
+            meta_tag = soup.select_one(selector)
+            if meta_tag:
+                image_url = meta_tag.get('content') or meta_tag.get('href')
+                if image_url and image_url.startswith('http'):
+                    # Проверяем что это действительно картинка
+                    if any(ext in image_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                        print(f"   🖼️ Найдена картинка в meta-тегах")
+                        return image_url
+
+        # Ищем главную картинку в контенте
+        content_selectors = [
+            'article img:first-of-type',
+            '.content img:first-of-type',
+            'main img:first-of-type',
+            '.post-content img:first-of-type',
+            '.article img:first-of-type',
+            'img[class*="hero"]',
+            'img[class*="main"]',
+            'img[class*="featured"]',
+            'img[class*="cover"]'
+        ]
+
+        for selector in content_selectors:
+            img_tag = soup.select_one(selector)
+            if img_tag:
+                image_url = img_tag.get('src')
+                if image_url and image_url.startswith('http'):
+                    if any(ext in image_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                        print(f"   🖼️ Найдена картинка в контенте: {selector}")
+                        return image_url
+                # Проверяем data-src для ленивой загрузки
+                elif img_tag.get('data-src'):
+                    image_url = img_tag.get('data-src')
+                    if image_url.startswith('http'):
+                        if any(ext in image_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                            print(f"   🖼️ Найдена картинка в data-src: {selector}")
+                            return image_url
+
+        print(f"   ❌ Картинка не найдена на странице")
+        return None
+
+    except Exception as e:
+        print(f"💥 Ошибка парсинга страницы {link}: {e}")
+        return None
+
+def get_news_image(entry, link):
+    """Пытается получить картинку разными способами"""
+    # 1. Сначала из RSS (быстрее)
+    image_url = extract_image_from_entry(entry)
+    if image_url:
+        print(f"   🖼️ Картинка найдена в RSS")
+        return image_url
+
+    # 2. Если в RSS нет - парсим со страницы
+    print(f"   🔍 Картинки в RSS нет, парсим страницу...")
+    image_url = extract_image_from_page(link)
+    if image_url:
+        print(f"   🖼️ Картинка найдена на странице")
+        return image_url
+
+    # 3. Если всё равно нет - возвращаем None
+    print(f"   ❌ Картинка не найдена ни в RSS, ни на странице")
     return None
 
 def create_news_message(domain, title, description, link, pub_date, was_translated, hashtag):
@@ -176,12 +263,12 @@ def create_news_message(domain, title, description, link, pub_date, was_translat
     message_parts = [
         f"🌐  {domain}",
         "",
-        f"⚡ *{title}*",
+        f"⚡  *{title}*",
     ]
 
     if description:
         message_parts.append("")
-        message_parts.append(f"✨ _{description}_")
+        message_parts.append(f"✨  _{description}_")
 
     message_parts.extend([
         "",
@@ -206,9 +293,9 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
         domain = urlparse(link).netloc.replace('www.', '')
         message_text = create_news_message(domain, title, description, link, pub_date, was_translated, hashtag)
 
-        # ВСЕГДА используем наш красивый формат с картинкой из RSS
+        # Всегда используем наш формат с картинкой если есть
         if image_url:
-            # Пробуем отправить с картинкой из RSS
+            # Пробуем отправить с картинкой
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             data = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
@@ -227,7 +314,7 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
                     'chat_id': TELEGRAM_CHANNEL_ID,
                     'text': message_text,
                     'parse_mode': 'Markdown',
-                    'disable_web_page_preview': True  # Запрещаем превью
+                    'disable_web_page_preview': True
                 }
                 response = requests.post(url, data=data, timeout=10)
         else:
@@ -237,7 +324,7 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
                 'chat_id': TELEGRAM_CHANNEL_ID,
                 'text': message_text,
                 'parse_mode': 'Markdown',
-                'disable_web_page_preview': True  # Запрещаем превью
+                'disable_web_page_preview': True
             }
             response = requests.post(url, data=data, timeout=10)
 
@@ -297,11 +384,8 @@ def run_bot():
                             latest.description if hasattr(latest, 'description') else ""
                         )
 
-                        image_url = extract_image_from_entry(latest)
-                        if image_url:
-                            print(f"   🖼️ Найдена картинка в RSS")
-                        else:
-                            print(f"   📄 Картинка не найдена")
+                        # УЛУЧШЕННЫЙ ПОИСК КАРТИНКИ: сначала RSS, потом страница
+                        image_url = get_news_image(latest, link)
 
                         if send_news_message(title, description, link, pub_date, image_url, was_translated, hashtag):
                             last_links[url] = link
