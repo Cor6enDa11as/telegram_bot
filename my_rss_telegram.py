@@ -27,7 +27,7 @@ RSS_SOURCES = [
     {"url": "https://habr.com/ru/rss/flows/popsci/articles/?fl=ru", "hashtag": "#наука"},
     {"url": "https://4pda.to/feed/", "hashtag": "#мобильные"},
     {"url": "https://tech.onliner.by/feed", "hashtag": "#технологии"},
-    {"url": "https://www.ixbt.com/export/news.rss", "hashtag": "#технологии#гаджеты#техника#авто"},
+    {"url": "https://www.ixbt.com/export/news.rss", "hashtag": "#технологии"},
     {"url": "https://androidinsider.ru/feed", "hashtag": "#android"},
     {"url": "https://naked-science.ru/feed", "hashtag": "#наука"},
     {"url": "https://www.opennet.ru/opennews/opennews_full_utf.rss", "hashtag": "#linux"},
@@ -41,9 +41,9 @@ RSS_SOURCES = [
     {"url": "https://www.gamingonlinux.com/article_rss.php", "hashtag": "#linux"},
     {"url": "https://itsfoss.com/feed/", "hashtag": "#linux"},
     {"url": "https://www.omgubuntu.co.uk/feed/", "hashtag": "#linux"},
-    {"url": "https://rozetked.me/turbo", "hashtag": "#технологии#гаджеты#техника#авто"},
+    {"url": "https://rozetked.me/turbo", "hashtag": "#технологии"},
     {"url": "https://mobile-review.com/all/news/feed/", "hashtag": "#android"},
-    {"url": "https://droider.ru/feed", "hashtag": "#технологии#гаджеты#техника#авто"},
+    {"url": "https://droider.ru/feed", "hashtag": "#технологии"},
     {"url": "https://www.comss.ru/linux.php", "hashtag": "#linux"},
 ]
 
@@ -58,17 +58,14 @@ def parse_feed(url):
         response = requests.get(url, headers=headers, timeout=10)
         content = response.content
 
-        # Конвертируем windows-1251 в UTF-8 для нужных сайтов
         if any(site in url for site in ['4pda.to', 'ixbt.com']):
             try:
                 content = content.decode('windows-1251').encode('utf-8')
             except:
                 pass
 
-        # Парсим с игнорированием ошибок
         feed = feedparser.parse(content)
 
-        # Если есть ошибки парсинга, но есть записи - все равно используем
         if feed.bozo and feed.entries:
             print(f"   ⚠️ Есть ошибки парсинга, но новости найдены: {feed.bozo_exception}")
             return feed
@@ -112,12 +109,9 @@ def prepare_news_content(title, description):
 
     processed_description = ""
     if description:
-        # Более агрессивная очистка HTML тегов
         clean_desc = re.sub('<[^<]+?>', '', description)
         clean_desc = html.unescape(clean_desc)
         clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
-
-        # Удаляем возможные остатки битых тегов
         clean_desc = re.sub(r'<[^>]*$', '', clean_desc)
         clean_desc = re.sub(r'^[^<]*>', '', clean_desc)
 
@@ -136,29 +130,24 @@ def prepare_news_content(title, description):
     return processed_title, processed_description, was_translated
 
 def extract_image_from_entry(entry):
-    """Улучшенный поиск картинок в RSS записи"""
+    """Поиск картинок в RSS записи"""
     try:
-        # 1. Проверяем медиа-контент (для Phoronix и других)
         if hasattr(entry, 'links'):
             for link in entry.links:
                 if 'image' in link.type:
                     return link.href
-                # Для enclosure ссылок
                 if hasattr(link, 'rel') and 'enclosure' in link.rel:
                     if 'image' in getattr(link, 'type', ''):
                         return link.href
 
-        # 2. Проверяем медиа-контент по стандарту Media RSS
         if hasattr(entry, 'media_content'):
             for media in entry.media_content:
                 if media.get('type', '').startswith('image/'):
                     return media['url']
 
-        # 3. Проверяем медиа-thumbnail
         if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
             return entry.media_thumbnail[0]['url']
 
-        # 4. Ищем в summary/content
         content_fields = ['summary', 'content', 'description', 'content_encoded']
         for field in content_fields:
             if hasattr(entry, field):
@@ -172,46 +161,90 @@ def extract_image_from_entry(entry):
                         if any(ext in img_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
                             return img_url
 
-        # 5. Проверяем enclosures
         if hasattr(entry, 'enclosures'):
             for enclosure in entry.enclosures:
                 if 'image' in getattr(enclosure, 'type', ''):
                     return enclosure.href
-
-        # 6. Для Phoronix: проверяем дополнительные поля
-        if hasattr(entry, 'phoronix_image'):
-            return entry.phoronix_image
 
     except Exception as e:
         print(f"💥 Ошибка поиска картинки: {e}")
 
     return None
 
-def create_news_message(domain, title, description, link, pub_date, was_translated, hashtag):
-    """Создает сообщение с markdown разметкой"""
+def check_site_supports_preview(link):
+    """Проверяет, поддерживает ли сайт Telegram превью"""
+    try:
+        # Проверяем основные meta-теги для превью
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml'
+        }
+
+        response = requests.get(link, headers=headers, timeout=5)
+        content = response.text
+
+        # Проверяем наличие основных meta-тегов для превью
+        has_og_image = 'property="og:image"' in content or 'property=\'og:image\'' in content
+        has_og_title = 'property="og:title"' in content or 'property=\'og:title\'' in content
+        has_twitter_image = 'name="twitter:image"' in content or 'name=\'twitter:image\'' in content
+
+        supports_preview = has_og_image or has_twitter_image
+
+        if supports_preview:
+            print(f"   ✅ Сайт поддерживает превью (найдены meta-теги)")
+        else:
+            print(f"   ❌ Сайт не поддерживает превью (нет meta-тегов)")
+
+        return supports_preview
+
+    except Exception as e:
+        print(f"   ⚠️ Не удалось проверить превью: {e}")
+        return False
+
+def create_preview_message(pub_date, hashtag, was_translated):
+    """Создает минимальное сообщение для превью (только дата и хэштег)"""
+    message_parts = []
+
+    message_parts.extend([
+        "",
+        f"📅 {pub_date}",
+        "",
+    ])
+
+    if hashtag:
+        message_parts.append(f"🏷️ {hashtag}")
+
+    if was_translated:
+        message_parts.append("")
+        message_parts.append("`🔤 [Переведено]`")
+
+    return "\n".join(message_parts)
+
+def create_full_message(domain, title, description, link, pub_date, was_translated, hashtag):
+    """Создает полное сообщение с картинкой"""
     message_parts = [
         f"🌐 {domain}",
-        "",  # Пробел после источника
+        "",
         f"📢 **{title}**",
     ]
 
     if description:
-        message_parts.append("")  # Пробел перед описанием
+        message_parts.append("")
         message_parts.append(f"📝 *{description}*")
 
     message_parts.extend([
-        "",  # Пробел перед ссылкой
+        "",
         f"🔗 [Читать]({link})",
-        "",  # Пробел перед датой
+        "",
         f"📅 {pub_date}",
     ])
 
     if hashtag:
-        message_parts.append("")  # Пробел перед хэштегом
+        message_parts.append("")
         message_parts.append(f"🏷️ {hashtag}")
 
     if was_translated:
-        message_parts.append("")  # Пробел перед отметкой перевода
+        message_parts.append("")
         message_parts.append("`🔤 [Переведено]`")
 
     return "\n".join(message_parts)
@@ -220,11 +253,30 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
     """Отправляет сообщение в Telegram"""
     try:
         domain = urlparse(link).netloc.replace('www.', '')
-        message_text = create_news_message(domain, title, description, link, pub_date, was_translated, hashtag)
 
-        # Всегда разрешаем предпросмотр страницы - Telegram сам добавит картинку если нужно
-        if image_url:
-            # Пробуем отправить с картинкой из RSS
+        # УМНАЯ ЛОГИКА ВЫБОРА ФОРМАТА:
+        # 1. Проверяем поддержку превью
+        supports_preview = check_site_supports_preview(link)
+
+        # 2. Выбираем формат на основе проверки и перевода
+        if not was_translated and supports_preview:
+            # Telegram превью: русскоязычный + поддерживает превью
+            message_text = create_preview_message(pub_date, hashtag, was_translated)
+            disable_preview = False  # Разрешаем превью
+            use_photo = False
+            print(f"   📱 Использую Telegram превью")
+        else:
+            # Полное сообщение: либо переведенное, либо не поддерживает превью
+            message_text = create_full_message(domain, title, description, link, pub_date, was_translated, hashtag)
+            disable_preview = True  # Запрещаем превью
+            use_photo = bool(image_url)
+            if was_translated:
+                print(f"   🎨 Использую полное сообщение (перевод)")
+            else:
+                print(f"   🎨 Использую полное сообщение (нет превью)")
+
+        if use_photo and image_url:
+            # Отправляем с картинкой из RSS
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             data = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
@@ -232,28 +284,17 @@ def send_news_message(title, description, link, pub_date, image_url=None, was_tr
                 'caption': message_text,
                 'parse_mode': 'Markdown'
             }
-            response = requests.post(url, data=data, timeout=10)
-
-            # Если не получилось с картинкой, отправляем текстовое сообщение
-            if response.status_code != 200:
-                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                data = {
-                    'chat_id': TELEGRAM_CHANNEL_ID,
-                    'text': message_text,
-                    'parse_mode': 'Markdown',
-                    'disable_web_page_preview': False  # Разрешаем предпросмотр
-                }
-                response = requests.post(url, data=data, timeout=10)
         else:
-            # Отправляем текстовое сообщение с разрешенным предпросмотром
+            # Текстовое сообщение
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {
                 'chat_id': TELEGRAM_CHANNEL_ID,
                 'text': message_text,
                 'parse_mode': 'Markdown',
-                'disable_web_page_preview': False  # ВКЛЮЧАЕМ предпросмотр страницы
+                'disable_web_page_preview': disable_preview
             }
-            response = requests.post(url, data=data, timeout=10)
+
+        response = requests.post(url, data=data, timeout=10)
 
         if response.status_code == 200:
             print(f"✅ Отправлено: {title[:50]}... {hashtag}")
@@ -270,7 +311,6 @@ def run_bot():
     last_links = {}
     print("🚀 Бот запущен...")
 
-    # Инициализация
     for source in RSS_SOURCES:
         url, hashtag = source["url"], source["hashtag"]
         try:
@@ -283,7 +323,6 @@ def run_bot():
         except Exception as e:
             print(f"💥 Ошибка {url}: {e}")
 
-    # Основной цикл
     while True:
         try:
             print(f"\n🔍 Проверка... ({datetime.now().strftime('%H:%M:%S')})")
@@ -304,7 +343,6 @@ def run_bot():
                             print(f"🎉 НОВОСТЬ: {hashtag}")
                             found_new_news = True
 
-                        # Подготовка данных
                         pub_date = "Дата неизвестна"
                         if hasattr(latest, 'published_parsed') and latest.published_parsed:
                             pub_date = datetime(*latest.published_parsed[:6]).strftime("%d.%m.%Y %H:%M")
@@ -317,10 +355,7 @@ def run_bot():
                         image_url = extract_image_from_entry(latest)
                         if image_url:
                             print(f"   🖼️ Найдена картинка в RSS")
-                        else:
-                            print(f"   📄 Картинка в RSS не найдена (Telegram добавит свою)")
 
-                        # Отправка
                         if send_news_message(title, description, link, pub_date, image_url, was_translated, hashtag):
                             last_links[url] = link
 
