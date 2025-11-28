@@ -145,9 +145,9 @@ def format_message(entry, rss_url):
 
     # ИСПРАВЛЕНО: Структура: ссылка → хэштег и автор → пробел → превью
     if was_translated:
-        return f"{invisible_link}\n{translated_title}\n{meta_line}\n"
+        return f"{invisible_link}\n{translated_title}\n\n{meta_line}\n\n"
     else:
-        return f"{invisible_link}\n{meta_line}\n"
+        return f"{invisible_link}\n\n{meta_line}\n\n"
 
 def send_to_telegram(message):
     """Отправляет сообщение в Telegram"""
