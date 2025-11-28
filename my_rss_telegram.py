@@ -7,6 +7,7 @@ from threading import Thread
 import time
 import logging
 from dotenv import load_dotenv
+import re
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -48,8 +49,21 @@ def save_processed_links(links):
             f.write(link + '\n')
     logger.info(f"Сохранено {len(recent_links)} обработанных ссылок")
 
+def clean_title(title):
+    """Очищает заголовок от лишних символов и исправляет проблему с [Перевод]"""
+    # Убираем квадратные скобки и их содержимое (например, [Перевод])
+    cleaned = re.sub(r'\[.*?\]', '', title).strip()
+    # Убираем лишние пробелы
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned
+
 def translate_text(text):
+    """Переводит текст на русский язык"""
     try:
+        # Если текст уже содержит кириллицу - не переводим
+        if re.search('[а-яА-Я]', text):
+            return text
+
         url = "https://translate.googleapis.com/translate_a/single"
         params = {'client': 'gtx', 'sl': 'auto', 'tl': 'ru', 'dt': 't', 'q': text}
         response = requests.get(url, params=params, timeout=10)
@@ -58,36 +72,49 @@ def translate_text(text):
             translated = ''.join([item[0] for item in data[0] if item[0]])
             logger.info(f"Перевод: '{text}' -> '{translated}'")
             return translated
-        logger.warning(f"Ошибка перевода: статус {response.status_code}")
         return text
     except Exception as e:
         logger.warning(f"Ошибка перевода: {e}")
         return text
 
 def get_hashtag(rss_url):
+    """Генерирует хэштег на основе домена RSS ленты"""
     try:
         from urllib.parse import urlparse
         domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0]
         hashtag = f"#{domain}"
-        logger.info(f"Хэштег для {rss_url}: {hashtag}")
         return hashtag
-    except Exception as e:
-        logger.warning(f"Ошибка генерации хэштега: {e}")
+    except:
         return "#news"
 
 def format_message(entry, rss_url):
-    translated_title = translate_text(entry.title)
+    """Форматирует сообщение с кликабельным заголовком"""
+    # Очищаем заголовок от [Перевод] и других скобок
+    clean_title_text = clean_title(entry.title)
+
+    # Переводим заголовок если нужно
+    translated_title = translate_text(clean_title_text)
+
+    # Создаем кликабельный заголовок
     clickable_title = f"📰 [{translated_title}]({entry.link})"
+
+    # Генерируем хэштег
     hashtag = get_hashtag(rss_url)
+
+    # Собираем строку с автором и хэштегом
     if hasattr(entry, 'author') and entry.author:
-        meta_line = f"👤 {entry.author} • {hashtag}"
+        author_emoji = "👤"
+        meta_line = f"{author_emoji} {entry.author} • 🏷️ {hashtag}"
     else:
         meta_line = f"🏷️ {hashtag}"
-    message = f"{clickable_title}\n{meta_line}"
-    logger.info(f"Форматированное сообщение: {message}")
+
+    # Собираем полное сообщение с пробелом между блоками
+    message = f"{clickable_title}\n\n{meta_line}"
+
     return message
 
 def send_to_telegram(message):
+    """Отправляет сообщение в Telegram канал"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         'chat_id': CHANNEL_ID,
@@ -98,19 +125,27 @@ def send_to_telegram(message):
     try:
         logger.info(f"Отправка сообщения в Telegram...")
         response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"Ответ Telegram API: {response.status_code} - {response.text}")
+        logger.info(f"Ответ Telegram API: {response.status_code}")
 
         if response.status_code == 200:
             logger.info("✅ Сообщение успешно отправлено в Telegram")
             return True
+        elif response.status_code == 429:
+            # Обработка слишком частых запросов
+            error_data = response.json()
+            retry_after = error_data.get('parameters', {}).get('retry_after', 30)
+            logger.warning(f"⚠️ Telegram ограничил запросы. Ждем {retry_after} секунд")
+            time.sleep(retry_after + 5)
+            return False
         else:
-            logger.error(f"❌ Ошибка отправки в Telegram: {response.status_code} - {response.text}")
+            logger.error(f"❌ Ошибка отправки в Telegram: {response.status_code}")
             return False
     except Exception as e:
         logger.error(f"❌ Исключение при отправке в Telegram: {e}")
         return False
 
 def check_single_feed(rss_url, processed_links):
+    """Проверяет одну RSS ленту на новые записи"""
     try:
         logger.info(f"🔍 Проверяем RSS ленту: {rss_url}")
         feed = feedparser.parse(rss_url)
@@ -119,32 +154,35 @@ def check_single_feed(rss_url, processed_links):
             logger.info("📭 Лента пуста")
             return processed_links, 0
 
-        logger.info(f"📖 Найдено {len(feed.entries)} записей в ленте")
-        new_count = 0
+        # Берем только САМУЮ СВЕЖУЮ запись (первую в списке)
+        latest_entry = feed.entries[0]
+        latest_link = latest_entry.link
 
-        for entry in feed.entries:
-            if entry.link not in processed_links:
-                logger.info(f"🆕 Новая запись: {entry.title}")
-                message = format_message(entry, rss_url)
+        logger.info(f"📖 Самая свежая запись: {latest_entry.title}")
 
-                if send_to_telegram(message):
-                    processed_links.add(entry.link)
-                    new_count += 1
-                    logger.info(f"✅ Запись добавлена в обработанные")
-                    time.sleep(1)
-                else:
-                    logger.error("❌ Не удалось отправить сообщение в Telegram")
+        # Сравниваем ссылку с уже отправленными
+        if latest_link not in processed_links:
+            logger.info(f"🆕 Новая запись!")
+            message = format_message(latest_entry, rss_url)
+
+            if send_to_telegram(message):
+                processed_links.add(latest_link)
+                logger.info(f"✅ Запись добавлена в обработанные")
+                time.sleep(10)  # Задержка 10 секунд между сообщениями
+                return processed_links, 1
             else:
-                logger.info("⏩ Пропускаем уже обработанную запись")
-                break  # Прерываем, так как записи идут от новых к старым
-
-        return processed_links, new_count
+                logger.error("❌ Не удалось отправить сообщение в Telegram")
+                return processed_links, 0
+        else:
+            logger.info("⏩ Нет новых записей")
+            return processed_links, 0
 
     except Exception as e:
         logger.error(f"❌ Ошибка при проверке ленты {rss_url}: {e}")
         return processed_links, 0
 
 def rss_check_loop():
+    """Бесконечный цикл проверки RSS лент"""
     logger.info("🔄 Запуск цикла проверки RSS...")
 
     while True:
@@ -163,8 +201,8 @@ def rss_check_loop():
             else:
                 logger.info("ℹ️ Проверка завершена. Новых записей нет.")
 
-            logger.info("⏰ Ожидание 10 минут до следующей проверки...")
-            time.sleep(600)  # 10 минут
+            logger.info("⏰ Ожидание 15 минут до следующей проверки...")
+            time.sleep(900)  # 15 минут
 
         except Exception as e:
             logger.error(f"❌ Ошибка в основном цикле: {e}")
