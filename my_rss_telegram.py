@@ -26,23 +26,16 @@ if not all([BOT_TOKEN, CHANNEL_ID, RSS_FEED_URLS]):
     logger.error("❌ Отсутствуют необходимые переменные окружения!")
     exit(1)
 
-# Состояние приложения
-processed_links = set()
+# ОПТИМИЗИРОВАННО: Храним только текущие свежие ссылки для каждой ленты
+current_links = {}  # Формат: {'rss_url': 'latest_link'}
 first_run = True
 
 def robust_parse_feed(rss_url):
     """Многоуровневый парсинг с fallback-методами"""
     methods = [
-        # Метод 1: Прямой парсинг (основной)
         lambda: feedparser.parse(rss_url),
-
-        # Метод 2: Через requests с текстом
         lambda: parse_with_requests_text(rss_url),
-
-        # Метод 3: Через requests с байтами
         lambda: parse_with_requests_bytes(rss_url),
-
-        # Метод 4: С пользовательским User-Agent
         lambda: parse_with_custom_headers(rss_url),
     ]
 
@@ -137,10 +130,10 @@ def is_hashtag_text(text):
     return len(hashtag_words) > 0 and len(hashtag_words) / len(words) > 0.5
 
 def format_message(entry, rss_url):
-    """Форматирует сообщение: ссылка → заголовок → пробел → превью → пробел → хэштег и автор"""
+    """Форматирует сообщение: невидимая ссылка → хэштег и автор → пробел → превью"""
     translated_title, was_translated = translate_text(entry.title)
 
-    # НЕВИДИМАЯ ССЫЛКА в начале сообщения
+    # ИСПРАВЛЕНО: Невидимая ссылка БЕЗ пробела в начале
     invisible_link = f"[‎]({entry.link})"  # U+200E (left-to-right mark)
 
     hashtag = get_hashtag(rss_url)
@@ -150,11 +143,11 @@ def format_message(entry, rss_url):
     else:
         meta_line = f"🏷️ {hashtag}"
 
-    # Структура: ссылка → заголовок (если есть) → пробелы → хэштег и автор
+    # ИСПРАВЛЕНО: Структура: ссылка → хэштег и автор → пробел → превью
     if was_translated:
-        return f"{invisible_link}\n{translated_title}\n\n\n{meta_line}"
+        return f"{invisible_link}\n{translated_title}\n{meta_line}\n"
     else:
-        return f"{invisible_link}\n\n\n{meta_line}"
+        return f"{invisible_link}\n{meta_line}\n"
 
 def send_to_telegram(message):
     """Отправляет сообщение в Telegram"""
@@ -181,39 +174,46 @@ def parse_feed(rss_url):
     """Парсит RSS ленту с улучшенной обработкой ошибок"""
     return robust_parse_feed(rss_url)
 
-def initialize_processed_links():
-    """Инициализация при первом запуске"""
-    global processed_links, first_run
+def initialize_current_links():
+    """Инициализация при первом запуске - запоминаем текущие ссылки"""
+    global current_links, first_run
 
-    logger.info("🚀 Первый запуск - инициализация базы ссылок...")
+    logger.info("🚀 Первый запуск - инициализация текущих ссылок...")
 
     for rss_url in RSS_FEED_URLS:
         feed = parse_feed(rss_url)
         if feed and feed.entries:
-            latest_entry = feed.entries[0]
-            processed_links.add(latest_entry.link)
-            logger.info(f"📝 Запомнили: {latest_entry.title}")
+            latest_link = feed.entries[0].link
+            current_links[rss_url] = latest_link
+            logger.info(f"📝 Запомнили для {rss_url}: {latest_link}")
 
     first_run = False
-    logger.info(f"✅ Инициализация завершена. Запомнено {len(processed_links)} ссылок")
+    logger.info(f"✅ Инициализация завершена. Запомнено {len(current_links)} текущих ссылок")
 
 def check_feed(rss_url):
-    """Проверяет RSS ленту на новые записи"""
-    global processed_links
+    """Проверяет RSS ленту на новые записи - сравниваем с сохраненной ссылкой"""
+    global current_links
 
     feed = parse_feed(rss_url)
-    if not feed:
+    if not feed or not feed.entries:
         return 0
 
     latest_entry = feed.entries[0]
+    latest_link = latest_entry.link
+    saved_link = current_links.get(rss_url)
 
-    if latest_entry.link not in processed_links:
-        logger.info(f"🆕 Новая запись: {latest_entry.title}")
+    # Сравниваем текущую ссылку с сохраненной для ЭТОЙ ленты
+    if latest_link != saved_link:
+        logger.info(f"🆕 Новая запись в {rss_url}: {latest_entry.title}")
 
         if send_to_telegram(format_message(latest_entry, rss_url)):
-            processed_links.add(latest_entry.link)
+            # ОБНОВЛЯЕМ только ссылку для этой ленты
+            current_links[rss_url] = latest_link
+            logger.info(f"🔄 Обновили ссылку для {rss_url}")
             time.sleep(8)
             return 1
+    else:
+        logger.info(f"⏩ Нет новых записей в {rss_url}")
 
     return 0
 
@@ -222,7 +222,7 @@ def rss_check_loop():
     global first_run
 
     if first_run:
-        initialize_processed_links()
+        initialize_current_links()
         logger.info("⏰ Ожидание 15 минут до первой проверки...")
         time.sleep(900)
 
