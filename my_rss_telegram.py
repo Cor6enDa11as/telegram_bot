@@ -30,14 +30,77 @@ if not all([BOT_TOKEN, CHANNEL_ID, RSS_FEED_URLS]):
 processed_links = set()
 first_run = True
 
+def robust_parse_feed(rss_url):
+    """Многоуровневый парсинг с fallback-методами"""
+    methods = [
+        # Метод 1: Прямой парсинг (основной)
+        lambda: feedparser.parse(rss_url),
+
+        # Метод 2: Через requests с текстом
+        lambda: parse_with_requests_text(rss_url),
+
+        # Метод 3: Через requests с байтами
+        lambda: parse_with_requests_bytes(rss_url),
+
+        # Метод 4: С пользовательским User-Agent
+        lambda: parse_with_custom_headers(rss_url),
+    ]
+
+    for i, method in enumerate(methods):
+        try:
+            logger.info(f"🔄 Попытка {i+1} для {rss_url}")
+            feed = method()
+            if feed and feed.entries:
+                logger.info(f"✅ Успех методом {i+1}, записей: {len(feed.entries)}")
+                return feed
+        except Exception as e:
+            logger.warning(f"⚠️ Метод {i+1} не сработал: {e}")
+            continue
+
+    logger.error(f"❌ Все методы парсинга не сработали для {rss_url}")
+    return None
+
+def parse_with_requests_text(rss_url):
+    """Парсинг через requests с текстом"""
+    response = requests.get(rss_url, timeout=15, headers={
+        'User-Agent': 'Mozilla/5.0 (compatible; RSS-Bot/1.0)'
+    })
+    response.raise_for_status()
+    return feedparser.parse(response.text)
+
+def parse_with_requests_bytes(rss_url):
+    """Парсинг через requests с байтами"""
+    response = requests.get(rss_url, timeout=15, headers={
+        'User-Agent': 'Mozilla/5.0 (compatible; RSS-Bot/1.0)'
+    })
+    response.raise_for_status()
+    return feedparser.parse(response.content)
+
+def parse_with_custom_headers(rss_url):
+    """Парсинг с разными User-Agent"""
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Googlebot/2.1 (+http://www.google.com/bot.html)',
+        'Mozilla/5.0 (compatible; RSS-Bot/1.0)'
+    ]
+
+    for ua in user_agents:
+        try:
+            response = requests.get(rss_url, timeout=10, headers={'User-Agent': ua})
+            response.raise_for_status()
+            feed = feedparser.parse(response.text)
+            if feed and feed.entries:
+                return feed
+        except:
+            continue
+    return None
+
 def translate_text(text):
     """Переводит текст на русский язык и возвращает (текст, был_ли_перевод)"""
     try:
-        # Проверяем, есть ли кириллица
         if re.search('[а-яА-Я]', text):
-            return text, False  # Уже на русском - перевод не нужен
+            return text, False
 
-        # Переводим с английского на русский
         url = "https://translate.googleapis.com/translate_a/single"
         params = {
             'client': 'gtx',
@@ -50,7 +113,7 @@ def translate_text(text):
         if response.status_code == 200:
             data = response.json()
             translated = ''.join([item[0] for item in data[0] if item[0]])
-            return translated, True  # Был выполнен перевод
+            return translated, True
         return text, False
     except Exception as e:
         logger.warning(f"Ошибка перевода: {e}")
@@ -74,26 +137,24 @@ def is_hashtag_text(text):
     return len(hashtag_words) > 0 and len(hashtag_words) / len(words) > 0.5
 
 def format_message(entry, rss_url):
-    """Форматирует сообщение с пробелами между всеми частями"""
+    """Форматирует сообщение: ссылка → заголовок → пробел → превью → пробел → хэштег и автор"""
     translated_title, was_translated = translate_text(entry.title)
 
-    # Невидимая ссылка как первая строка с пробелом в начале
-    invisible_link = f"[\u200B]({entry.link})"
+    # НЕВИДИМАЯ ССЫЛКА в начале сообщения
+    invisible_link = f"[‎]({entry.link})"  # U+200E (left-to-right mark)
 
     hashtag = get_hashtag(rss_url)
 
-    # Мета-информация
     if hasattr(entry, 'author') and entry.author and not is_hashtag_text(entry.author):
         meta_line = f"🏷️ {hashtag} • 👤 {entry.author}"
     else:
         meta_line = f"🏷️ {hashtag}"
 
-    # Структура с переводом
+    # Структура: ссылка → заголовок (если есть) → пробелы → хэштег и автор
     if was_translated:
-        return f" {invisible_link}\n\n{translated_title}\n\n\n{meta_line}"
-    # Структура без перевода - ТОЖЕ с пробелом в начале
+        return f"{invisible_link}\n{translated_title}\n\n\n{meta_line}"
     else:
-        return f" {invisible_link}\n\n\n{meta_line}"
+        return f"{invisible_link}\n\n\n{meta_line}"
 
 def send_to_telegram(message):
     """Отправляет сообщение в Telegram"""
@@ -117,18 +178,8 @@ def send_to_telegram(message):
         return False
 
 def parse_feed(rss_url):
-    """Парсит RSS ленту"""
-    try:
-        feed = feedparser.parse(rss_url)
-        if feed.entries:
-            logger.info(f"✅ Загружено {len(feed.entries)} записей из {rss_url}")
-            return feed
-        else:
-            logger.warning(f"⚠️ Нет записей в ленте: {rss_url}")
-            return None
-    except Exception as e:
-        logger.error(f"❌ Ошибка парсинга {rss_url}: {e}")
-        return None
+    """Парсит RSS ленту с улучшенной обработкой ошибок"""
+    return robust_parse_feed(rss_url)
 
 def initialize_processed_links():
     """Инициализация при первом запуске"""
@@ -161,7 +212,7 @@ def check_feed(rss_url):
 
         if send_to_telegram(format_message(latest_entry, rss_url)):
             processed_links.add(latest_entry.link)
-            time.sleep(8)  # Задержка между сообщениями
+            time.sleep(8)
             return 1
 
     return 0
@@ -170,13 +221,11 @@ def rss_check_loop():
     """Основной цикл проверки"""
     global first_run
 
-    # Первый запуск
     if first_run:
         initialize_processed_links()
         logger.info("⏰ Ожидание 15 минут до первой проверки...")
         time.sleep(900)
 
-    # Основной цикл
     while True:
         try:
             total_new = 0
@@ -197,7 +246,6 @@ def rss_check_loop():
             logger.error(f"❌ Ошибка в основном цикле: {e}")
             time.sleep(60)
 
-# Инициализация приложения
 @app.route('/')
 def home():
     return 'RSS Bot is running!'
@@ -210,14 +258,9 @@ def health():
 def ping():
     return 'pong'
 
-# Запуск
 if __name__ == '__main__':
     logger.info("🤖 Запуск RSS бота...")
     logger.info(f"📡 Отслеживается {len(RSS_FEED_URLS)} RSS лент")
 
-    # Запускаем фоновый поток
     Thread(target=rss_check_loop, daemon=True).start()
-
-    # Запускаем Flask
     app.run(host='0.0.0.0', port=5000)
-
