@@ -29,38 +29,19 @@ if not BOT_TOKEN or not CHANNEL_ID or not RSS_FEED_URLS:
     logger.error("❌ Отсутствуют необходимые переменные окружения!")
     exit(1)
 
-PROCESSED_LINKS_FILE = 'processed_links.txt'
-
-def load_processed_links():
-    try:
-        with open(PROCESSED_LINKS_FILE, 'r') as f:
-            links = set(line.strip() for line in f)
-            logger.info(f"Загружено {len(links)} обработанных ссылок")
-            return links
-    except FileNotFoundError:
-        logger.info("Файл с обработанными ссылками не найден, начинаем с чистого листа")
-        return set()
-
-def save_processed_links(links):
-    links_list = list(links)
-    recent_links = links_list[-100:] if len(links_list) > 100 else links_list
-    with open(PROCESSED_LINKS_FILE, 'w') as f:
-        for link in recent_links:
-            f.write(link + '\n')
-    logger.info(f"Сохранено {len(recent_links)} обработанных ссылок")
+# СЛОВАРЬ для хранения обработанных ссылок
+processed_links = set()
+first_run = True
 
 def clean_title(title):
     """Очищает заголовок от лишних символов и исправляет проблему с [Перевод]"""
-    # Убираем квадратные скобки и их содержимое (например, [Перевод])
     cleaned = re.sub(r'\[.*?\]', '', title).strip()
-    # Убираем лишние пробелы
     cleaned = re.sub(r'\s+', ' ', cleaned)
     return cleaned
 
 def translate_text(text):
     """Переводит текст на русский язык"""
     try:
-        # Если текст уже содержит кириллицу - не переводим
         if re.search('[а-яА-Я]', text):
             return text
 
@@ -70,7 +51,6 @@ def translate_text(text):
         if response.status_code == 200:
             data = response.json()
             translated = ''.join([item[0] for item in data[0] if item[0]])
-            logger.info(f"Перевод: '{text}' -> '{translated}'")
             return translated
         return text
     except Exception as e:
@@ -89,28 +69,18 @@ def get_hashtag(rss_url):
 
 def format_message(entry, rss_url):
     """Форматирует сообщение с кликабельным заголовком"""
-    # Очищаем заголовок от [Перевод] и других скобок
     clean_title_text = clean_title(entry.title)
-
-    # Переводим заголовок если нужно
     translated_title = translate_text(clean_title_text)
-
-    # Создаем кликабельный заголовок
     clickable_title = f"📰 [{translated_title}]({entry.link})"
-
-    # Генерируем хэштег
     hashtag = get_hashtag(rss_url)
 
-    # Собираем строку с автором и хэштегом
     if hasattr(entry, 'author') and entry.author:
         author_emoji = "👤"
         meta_line = f"{author_emoji} {entry.author} • 🏷️ {hashtag}"
     else:
         meta_line = f"🏷️ {hashtag}"
 
-    # Собираем полное сообщение с пробелом между блоками
     message = f"{clickable_title}\n\n{meta_line}"
-
     return message
 
 def send_to_telegram(message):
@@ -123,15 +93,12 @@ def send_to_telegram(message):
         'disable_web_page_preview': False
     }
     try:
-        logger.info(f"Отправка сообщения в Telegram...")
         response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"Ответ Telegram API: {response.status_code}")
 
         if response.status_code == 200:
             logger.info("✅ Сообщение успешно отправлено в Telegram")
             return True
         elif response.status_code == 429:
-            # Обработка слишком частых запросов
             error_data = response.json()
             retry_after = error_data.get('parameters', {}).get('retry_after', 30)
             logger.warning(f"⚠️ Telegram ограничил запросы. Ждем {retry_after} секунд")
@@ -144,17 +111,108 @@ def send_to_telegram(message):
         logger.error(f"❌ Исключение при отправке в Telegram: {e}")
         return False
 
-def check_single_feed(rss_url, processed_links):
+def safe_parse_feed(rss_url, max_retries=3):
+    """Безопасный парсинг RSS с повторными попытками и заголовками"""
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"📡 Попытка {attempt + 1} загрузки RSS: {rss_url}")
+
+            # Добавляем заголовки для обхода блокировок
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+
+            # Используем requests для загрузки с заголовками
+            response = requests.get(rss_url, headers=headers, timeout=15)
+
+            if response.status_code == 200:
+                # Парсим содержимое через feedparser
+                feed = feedparser.parse(response.content)
+
+                # Проверяем на ошибки парсинга
+                if hasattr(feed, 'bozo') and feed.bozo:
+                    logger.warning(f"⚠️ Проблема с RSS лентой: {feed.bozo_exception}")
+
+                # Проверяем есть ли записи
+                if not feed.entries:
+                    logger.warning(f"⚠️ RSS лента загрузилась, но записей нет: {rss_url}")
+                    logger.info(f"📊 Заголовки ответа: {response.headers}")
+
+                return feed
+            else:
+                logger.warning(f"⚠️ HTTP ошибка {response.status_code} для {rss_url}")
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5
+                    logger.info(f"⏰ Ждем {wait_time} секунд перед повторной попыткой...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"❌ Не удалось загрузить RSS после {max_retries} попыток: {rss_url}")
+                    return None
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"⚠️ Таймаут при загрузке RSS (попытка {attempt + 1}): {rss_url}")
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 5
+                logger.info(f"⏰ Ждем {wait_time} секунд перед повторной попыткой...")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"❌ Таймаут после {max_retries} попыток: {rss_url}")
+                return None
+
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка при загрузке RSS (попытка {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 5
+                logger.info(f"⏰ Ждем {wait_time} секунд перед повторной попыткой...")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"❌ Не удалось загрузить RSS после {max_retries} попыток: {rss_url}")
+                return None
+
+    return None
+
+def initialize_processed_links():
+    """При первом запуске запоминает текущие новости без отправки"""
+    global processed_links, first_run
+    logger.info("🚀 Первый запуск - инициализация базы ссылок...")
+
+    for rss_url in RSS_FEED_URLS:
+        try:
+            feed = safe_parse_feed(rss_url)
+            if feed and feed.entries:
+                # Берем только самую свежую новость и запоминаем ее
+                latest_entry = feed.entries[0]
+                processed_links.add(latest_entry.link)
+                logger.info(f"📝 Запомнили ссылку: {latest_entry.title}")
+            else:
+                logger.warning(f"⚠️ Не удалось загрузить ленту для инициализации: {rss_url}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при инициализации ленты {rss_url}: {e}")
+
+    first_run = False
+    logger.info(f"✅ Инициализация завершена. Запомнено {len(processed_links)} ссылок")
+
+def check_single_feed(rss_url):
     """Проверяет одну RSS ленту на новые записи"""
+    global processed_links
     try:
         logger.info(f"🔍 Проверяем RSS ленту: {rss_url}")
-        feed = feedparser.parse(rss_url)
+
+        feed = safe_parse_feed(rss_url)
+        if not feed:
+            logger.warning(f"📭 Не удалось загрузить ленту: {rss_url}")
+            return 0
 
         if not feed.entries:
-            logger.info("📭 Лента пуста")
-            return processed_links, 0
+            logger.warning(f"📭 Лента загрузилась, но записей нет: {rss_url}")
+            return 0
 
-        # Берем только САМУЮ СВЕЖУЮ запись (первую в списке)
+        # Берем только САМУЮ СВЕЖУЮ запись
         latest_entry = feed.entries[0]
         latest_link = latest_entry.link
 
@@ -168,33 +226,38 @@ def check_single_feed(rss_url, processed_links):
             if send_to_telegram(message):
                 processed_links.add(latest_link)
                 logger.info(f"✅ Запись добавлена в обработанные")
-                time.sleep(10)  # Задержка 10 секунд между сообщениями
-                return processed_links, 1
+                time.sleep(10)
+                return 1
             else:
                 logger.error("❌ Не удалось отправить сообщение в Telegram")
-                return processed_links, 0
+                return 0
         else:
             logger.info("⏩ Нет новых записей")
-            return processed_links, 0
+            return 0
 
     except Exception as e:
-        logger.error(f"❌ Ошибка при проверке ленты {rss_url}: {e}")
-        return processed_links, 0
+        logger.error(f"❌ Неожиданная ошибка при проверке ленты {rss_url}: {e}")
+        return 0
 
 def rss_check_loop():
     """Бесконечный цикл проверки RSS лент"""
+    global first_run
     logger.info("🔄 Запуск цикла проверки RSS...")
 
     while True:
         try:
-            processed_links = load_processed_links()
+            # Если первый запуск - инициализируем базу ссылок
+            if first_run:
+                initialize_processed_links()
+                logger.info("⏰ Ожидание 15 минут до первой проверки новых новостей...")
+                time.sleep(900)  # Ждем 15 минут перед первой проверкой
+                continue  # Переходим к следующей итерации
+
             total_new = 0
 
             for rss_url in RSS_FEED_URLS:
-                processed_links, new_entries = check_single_feed(rss_url, processed_links)
+                new_entries = check_single_feed(rss_url)
                 total_new += new_entries
-
-            save_processed_links(processed_links)
 
             if total_new > 0:
                 logger.info(f"🎉 Проверка завершена. Найдено {total_new} новых записей!")
@@ -205,7 +268,7 @@ def rss_check_loop():
             time.sleep(900)  # 15 минут
 
         except Exception as e:
-            logger.error(f"❌ Ошибка в основном цикле: {e}")
+            logger.error(f"❌ Критическая ошибка в основном цикле: {e}")
             logger.info("⏰ Ожидание 1 минуту перед повторной попыткой...")
             time.sleep(60)
 
