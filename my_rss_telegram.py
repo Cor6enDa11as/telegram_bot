@@ -9,7 +9,7 @@ import logging
 from dotenv import load_dotenv
 import re
 from datetime import datetime
-import calendar
+from urllib.parse import urlparse
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,85 +28,42 @@ if not all([BOT_TOKEN, CHANNEL_ID, RSS_FEED_URLS]):
     logger.error("❌ Отсутствуют необходимые переменные окружения!")
     exit(1)
 
-# Храним историю отправленных записей
-sent_entries = {}  # Формат: {'rss_url': set(['link1', 'link2', ...])}
-first_run = True
+# Словарь для отслеживания последних новостей
+last_links = {}
 
-def parse_date(date_string):
-    """Парсит дату из RSS в timestamp"""
-    if not date_string:
-        return None
+def should_translate_text(text):
+    """Определяет, нужно ли переводить текст"""
+    if not text or not text.strip():
+        return False
 
-    try:
-        time_tuple = feedparser._parse_date(date_string)
-        if time_tuple:
-            return calendar.timegm(time_tuple)
-    except:
-        pass
+    # Если текст уже содержит кириллицу - проверяем процент
+    if re.search('[а-яА-Я]', text):
+        # Подсчитываем процент кириллицы
+        total_letters = len([c for c in text if c.isalpha()])
+        if total_letters == 0:
+            return False
 
-    return time.time()
+        cyrillic_count = len([c for c in text if re.match('[а-яА-Я]', c)])
+        cyrillic_ratio = cyrillic_count / total_letters
 
-def robust_parse_feed(rss_url):
-    """Многоуровневый парсинг с fallback-методами"""
-    methods = [
-        lambda: feedparser.parse(rss_url),
-        lambda: parse_with_requests_text(rss_url),
-        lambda: parse_with_requests_bytes(rss_url),
-        lambda: parse_with_custom_headers(rss_url),
-    ]
+        # Если букв мало, не определяем язык
+        if total_letters < 3:
+            return False
 
-    for i, method in enumerate(methods):
-        try:
-            logger.info(f"🔄 Попытка {i+1} для {rss_url}")
-            feed = method()
-            if feed and feed.entries:
-                logger.info(f"✅ Успех методом {i+1}, записей: {len(feed.entries)}")
-                return feed
-        except Exception as e:
-            logger.warning(f"⚠️ Метод {i+1} не сработал: {e}")
-            continue
+        # Если более 30% символов - кириллица, считаем текст русским (не переводим)
+        return cyrillic_ratio <= 0.3
 
-    logger.error(f"❌ Все методы парсинга не сработали для {rss_url}")
-    return None
-
-def parse_with_requests_text(rss_url):
-    response = requests.get(rss_url, timeout=15, headers={
-        'User-Agent': 'Mozilla/5.0 (compatible; RSS-Bot/1.0)'
-    })
-    response.raise_for_status()
-    return feedparser.parse(response.text)
-
-def parse_with_requests_bytes(rss_url):
-    response = requests.get(rss_url, timeout=15, headers={
-        'User-Agent': 'Mozilla/5.0 (compatible; RSS-Bot/1.0)'
-    })
-    response.raise_for_status()
-    return feedparser.parse(response.content)
-
-def parse_with_custom_headers(rss_url):
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Googlebot/2.1 (+http://www.google.com/bot.html)',
-        'Mozilla/5.0 (compatible; RSS-Bot/1.0)'
-    ]
-
-    for ua in user_agents:
-        try:
-            response = requests.get(rss_url, timeout=10, headers={'User-Agent': ua})
-            response.raise_for_status()
-            feed = feedparser.parse(response.text)
-            if feed and feed.entries:
-                return feed
-        except:
-            continue
-    return None
+    # Если нет кириллицы - переводим
+    return True
 
 def translate_text(text):
     """Переводит текст на русский язык и возвращает (текст, был_ли_перевод)"""
     try:
-        if re.search('[а-яА-Я]', text):
+        # Сначала проверяем, нужно ли переводить
+        if not should_translate_text(text):
             return text, False
 
+        # Если нужно переводить - делаем перевод
         url = "https://translate.googleapis.com/translate_a/single"
         params = {
             'client': 'gtx',
@@ -124,6 +81,71 @@ def translate_text(text):
     except Exception as e:
         logger.warning(f"Ошибка перевода: {e}")
         return text, False
+
+def robust_parse_feed(rss_url):
+    """Улучшенный парсинг RSS с обходом защиты"""
+    methods = [
+        # Метод 1: Стандартный парсинг
+        lambda: feedparser.parse(rss_url),
+
+        # Метод 2: Requests с реалистичными заголовками
+        lambda: parse_with_realistic_headers(rss_url),
+
+        # Метод 3: Requests с сессией
+        lambda: parse_with_session(rss_url),
+    ]
+
+    for i, method in enumerate(methods):
+        try:
+            logger.info(f"🔄 Попытка {i+1} для {rss_url}")
+            feed = method()
+            if feed and feed.entries:
+                logger.info(f"✅ Успех методом {i+1}, записей: {len(feed.entries)}")
+                return feed
+        except Exception as e:
+            logger.warning(f"⚠️ Метод {i+1} не сработал: {e}")
+            continue
+
+    logger.error(f"❌ Все методы парсинга не сработали для {rss_url}")
+    return None
+
+def parse_with_realistic_headers(rss_url):
+    """Парсинг с реалистичными заголовками браузера"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+    }
+
+    response = requests.get(rss_url, timeout=20, headers=headers)
+    response.raise_for_status()
+    return feedparser.parse(response.content)
+
+def parse_with_session(rss_url):
+    """Парсинг с сессией и куками"""
+    session = requests.Session()
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    }
+
+    # Сначала получаем главную страницу для куков
+    try:
+        domain = urlparse(rss_url).netloc
+        main_page_url = f"https://{domain}"
+        session.get(main_page_url, timeout=10, headers=headers)
+        logger.info(f"🍪 Получили куки с главной страницы: {domain}")
+    except:
+        pass
+
+    # Затем получаем RSS
+    response = session.get(rss_url, timeout=15, headers=headers)
+    response.raise_for_status()
+    return feedparser.parse(response.content)
 
 def format_message(entry, rss_url):
     """Форматирует сообщение: невидимая ссылка → заголовок (если переведен)"""
@@ -161,122 +183,87 @@ def send_to_telegram(message):
         logger.error(f"❌ Ошибка: {e}")
         return False
 
-def initialize_sent_entries():
-    """Инициализация при первом запуске - запоминаем текущие записи"""
-    global sent_entries, first_run
-
-    logger.info("🚀 Первый запуск - инициализация истории записей...")
-
-    for rss_url in RSS_FEED_URLS:
-        feed = robust_parse_feed(rss_url)
-        if feed and feed.entries:
-            # Запоминаем все текущие записи как уже отправленные
-            sent_entries[rss_url] = set()
-            for entry in feed.entries[:10]:  # Запоминаем последние 10 записей
-                sent_entries[rss_url].add(entry.link)
-                logger.info(f"📝 Запомнили запись: {entry.link}")
-
-    first_run = False
-    logger.info(f"✅ Инициализация завершена. Запомнено записей: {sum(len(links) for links in sent_entries.values())}")
-
-def check_feed(rss_url):
-    """Проверяет RSS ленту на новые записи"""
-    global sent_entries
-
-    feed = robust_parse_feed(rss_url)
-    if not feed or not feed.entries:
-        return 0
-
-    # Инициализируем множество для этой RSS если его нет
-    if rss_url not in sent_entries:
-        sent_entries[rss_url] = set()
-
-    new_entries_count = 0
-
-    # Проверяем записи в обратном порядке (от старых к новым)
-    for entry in reversed(feed.entries):
-        if entry.link not in sent_entries[rss_url]:
-            logger.info(f"🆕 Новая запись в {rss_url}: {entry.title}")
-
-            if send_to_telegram(format_message(entry, rss_url)):
-                # Добавляем в отправленные
-                sent_entries[rss_url].add(entry.link)
-                new_entries_count += 1
-                logger.info(f"✅ Отправлено и запомнено: {entry.link}")
-
-                # Задержка между отправками сообщений
-                logger.info("⏸️ Задержка 10 секунд перед следующим сообщением...")
-                time.sleep(10)
-            else:
-                logger.error(f"❌ Не удалось отправить: {entry.link}")
-        else:
-            logger.info(f"⏩ Запись уже отправлена: {entry.link}")
-
-    # Очищаем старые записи чтобы не накапливать слишком много
-    if len(sent_entries[rss_url]) > 50:
-        # Оставляем только последние 30 записей
-        all_links = list(sent_entries[rss_url])
-        sent_entries[rss_url] = set(all_links[-30:])
-        logger.info(f"🧹 Очищены старые записи, осталось: {len(sent_entries[rss_url])}")
-
-    return new_entries_count
-
 def rss_check_loop():
-    """Основной цикл проверки"""
-    global first_run
+    """Главный цикл мониторинга с переводом"""
+    global last_links
 
-    if first_run:
-        initialize_sent_entries()
-        logger.info("⏰ Ожидание 15 минут до первой проверки...")
-        time.sleep(900)
+    logger.info("🚀 Запуск главного цикла мониторинга...")
+
+    # Первая инициализация
+    if not last_links:
+        logger.info("📝 Первая проверка - инициализация последних ссылок...")
+        for url in RSS_FEED_URLS:
+            try:
+                feed = robust_parse_feed(url)
+                if feed and feed.entries:
+                    latest = feed.entries[0]
+                    last_links[url] = latest.link
+                    logger.info(f"✅ Инициализирована лента: {urlparse(url).netloc}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка инициализации {url}: {e}")
+
+    logger.info(f"✅ Инициализация завершена. Отслеживается {len(last_links)} лент")
+    logger.info("⏰ Ожидание 15 минут до первой проверки...")
+    time.sleep(900)
 
     while True:
         try:
-            total_new = 0
+            for url in RSS_FEED_URLS:
+                try:
+                    # Парсим RSS-ленту
+                    feed = robust_parse_feed(url)
 
-            for rss_url in RSS_FEED_URLS:
-                logger.info(f"🔍 Проверяем ленту: {rss_url}")
-                new_entries = check_feed(rss_url)
-                total_new += new_entries
+                    # Проверяем что лента загрузилась
+                    if not feed or not feed.entries:
+                        logger.warning(f"⚠️ Нет новостей в ленте: {url}")
+                        continue
 
-                # Задержка между проверками разных RSS лент
-                if rss_url != RSS_FEED_URLS[-1]:  # Не ждем после последней ленты
-                    logger.info("⏸️ Задержка 5 секунд перед следующей лентой...")
-                    time.sleep(5)
+                    latest = feed.entries[0]
+                    link = latest.link
 
-            if total_new > 0:
-                logger.info(f"🎉 Найдено {total_new} новых записей!")
-            else:
-                logger.info("✅ Проверка завершена, новых записей нет")
+                    # Если это первая проверка - сохраняем ссылку
+                    if not last_links:
+                        last_links[url] = link
+                        continue
 
-            logger.info("⏰ Ожидание 15 минут до следующей проверки...")
-            time.sleep(900)
+                    # Проверяем есть ли новая новость
+                    if url in last_links:
+                        if last_links[url] != link:
+                            domain = urlparse(url).netloc
+                            logger.info(f"🎉 Новая новость из: {domain}")
+                            logger.info(f"📰 Заголовок: {latest.title}")
+
+                            # Отправляем сообщение
+                            if send_to_telegram(format_message(latest, url)):
+                                # Обновляем последнюю ссылку
+                                last_links[url] = link
+                                logger.info(f"✅ Новость отправлена и ссылка обновлена: {link}")
+
+                                # Задержка между отправками
+                                logger.info("⏸️ Задержка 10 секунд перед следующей отправкой...")
+                                time.sleep(10)
+                            else:
+                                logger.error(f"❌ Не удалось отправить новость: {link}")
+                    else:
+                        # Добавляем новую ленту в отслеживание
+                        last_links[url] = link
+                        logger.info(f"📝 Добавлена новая лента в отслеживание: {url}")
+
+                except Exception as e:
+                    logger.error(f"💥 Ошибка при обработке {url}: {e}")
+                    continue
+
+            # Ждем 15 минут перед следующей проверкой
+            logger.info(f"✅ Проверка завершена. Жду 15 минут... ({datetime.now().strftime('%H:%M:%S')})")
+            time.sleep(900)  # 900 секунд = 15 минут
 
         except Exception as e:
-            logger.error(f"❌ Ошибка в основном цикле: {e}")
+            logger.error(f"💥 Критическая ошибка в главном цикле: {e}")
             time.sleep(60)
 
 @app.route('/')
 def home():
     return 'RSS Bot is running!'
-
-@app.route('/health')
-def health():
-    return 'OK'
-
-@app.route('/ping')
-def ping():
-    return 'pong'
-
-@app.route('/status')
-def status():
-    """Статус бота с информацией о текущих отслеживаемых записях"""
-    status_info = {
-        'feeds_count': len(RSS_FEED_URLS),
-        'tracked_entries': sum(len(links) for links in sent_entries.values()),
-        'sent_entries_per_feed': {url: len(links) for url, links in sent_entries.items()}
-    }
-    return status_info
 
 if __name__ == '__main__':
     logger.info("🤖 Запуск RSS бота...")
