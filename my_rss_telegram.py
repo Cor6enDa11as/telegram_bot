@@ -146,8 +146,9 @@ def parse_with_session(rss_url):
         main_page_url = f"https://{domain}"
         session.get(main_page_url, timeout=10, headers=headers)
         logger.info(f"🍪 Получили куки с главной страницы: {domain}")
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось получить главную страницу: {e}")
+        # Продолжаем без куков
 
     # Затем получаем RSS
     response = session.get(rss_url, timeout=15, headers=headers)
