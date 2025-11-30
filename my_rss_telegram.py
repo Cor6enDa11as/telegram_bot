@@ -128,48 +128,84 @@ def format_message(entry, rss_url):
     """Форматирует сообщение - только заголовок если переведен"""
     try:
         if not entry.title or not entry.link:
+            logger.error(f"❌ Отсутствует заголовок или ссылка")
             return None
 
         translated_title, was_translated = translate_text(entry.title)
 
         # Возвращаем заголовок только если был перевод
         if was_translated:
-            return f"   \n{translated_title}\n   "
+            message = f"   \n{translated_title}\n   "
+            logger.info(f"📝 Сформирован заголовок: {translated_title[:50]}...")
         else:
             # Для непереведенных - пустое сообщение с отступами
-            return "   \n   "
+            message = "   \n   "
+            logger.info("📝 Сообщение без заголовка (не переведено)")
+
+        return message
 
     except Exception as e:
+        logger.error(f"❌ Ошибка форматирования: {e}")
         return "   \n   "
 
 def send_to_telegram(message, entry_link, rss_url, entry_title):
     """Отправляет сообщение в Telegram с кнопками"""
     if not message:
+        logger.error("❌ Пустое сообщение")
         return False
 
     # Генерируем хэштег на основе домена
-    domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0]
-    hashtag = f"#{domain}"
+    try:
+        domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0]
+        hashtag = f"#{domain}"
+    except:
+        hashtag = "#news"
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    # Создаем клавиатуру
+    keyboard = {
+        'inline_keyboard': [[
+            {'text': '📖 Читать статью', 'url': entry_link},
+            {'text': hashtag, 'url': f"https://t.me/{CHANNEL_ID.replace('@', '')}?q={hashtag}"}
+        ]]
+    }
+
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
         'parse_mode': None,
         'disable_web_page_preview': True,
         'disable_notification': False,
-        'reply_markup': {
-            'inline_keyboard': [[
-                {'text': '📖 Читать статью', 'url': entry_link},
-                {'text': hashtag, 'url': f"https://t.me/{CHANNEL_ID.replace('@', '')}?q={hashtag}"}
-            ]]
-        }
+        'reply_markup': keyboard
     }
 
     try:
+        logger.info(f"📤 Отправка сообщения с ссылкой: {entry_link}")
         response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-    except:
+
+        if response.status_code == 200:
+            logger.info("✅ Сообщение отправлено успешно")
+            return True
+        else:
+            logger.error(f"❌ Ошибка отправки: {response.status_code}")
+            logger.error(f"❌ Текст ошибки: {response.text}")
+
+            # Пробуем отправить без кнопок
+            logger.info("🔄 Пробуем отправить без кнопок...")
+            payload_without_buttons = payload.copy()
+            payload_without_buttons.pop('reply_markup', None)
+            payload_without_buttons['text'] = f"{message}\n\n{entry_link}"
+
+            response2 = requests.post(url, json=payload_without_buttons, timeout=10)
+            if response2.status_code == 200:
+                logger.info("✅ Сообщение отправлено без кнопок")
+                return True
+
+            return False
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка соединения: {e}")
         return False
 
 def rss_check_loop():
