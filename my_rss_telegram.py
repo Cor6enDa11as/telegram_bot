@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import re
 from datetime import datetime
 from urllib.parse import urlparse
+import random
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -85,14 +86,11 @@ def translate_text(text):
 def robust_parse_feed(rss_url):
     """Улучшенный парсинг RSS с обходом защиты"""
     methods = [
-        # Метод 1: Стандартный парсинг
-        lambda: feedparser.parse(rss_url),
-
-        # Метод 2: Requests с реалистичными заголовками
-        lambda: parse_with_realistic_headers(rss_url),
-
-        # Метод 3: Requests с сессией
-        lambda: parse_with_session(rss_url),
+        lambda: parse_with_advanced_headers(rss_url),
+        lambda: parse_with_rotating_agents(rss_url),
+        lambda: parse_with_browser_emulation(rss_url),
+        lambda: parse_with_referer_spoof(rss_url),
+        lambda: feedparser.parse(rss_url),  # Последняя попытка - стандартный метод
     ]
 
     for i, method in enumerate(methods):
@@ -109,65 +107,144 @@ def robust_parse_feed(rss_url):
     logger.error(f"❌ Все методы парсинга не сработали для {rss_url}")
     return None
 
-def parse_with_realistic_headers(rss_url):
-    """Парсинг с реалистичными заголовками браузера"""
+def parse_with_advanced_headers(rss_url):
+    """Парсинг с продвинутыми заголовками"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*; q=0.01',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'DNT': '1',
+        'Sec-GPC': '1',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+    }
+
+    response = requests.get(rss_url, timeout=25, headers=headers)
+    response.raise_for_status()
+    return feedparser.parse(response.content)
+
+def parse_with_rotating_agents(rss_url):
+    """Парсинг с ротацией User-Agent"""
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    ]
+
+    headers = {
+        'User-Agent': random.choice(user_agents),
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
     }
 
     response = requests.get(rss_url, timeout=20, headers=headers)
     response.raise_for_status()
     return feedparser.parse(response.content)
 
-def parse_with_session(rss_url):
-    """Парсинг с сессией и куками"""
+def parse_with_browser_emulation(rss_url):
+    """Парсинг с эмуляцией браузера через сессию"""
     session = requests.Session()
 
+    # Основные заголовки
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
     }
 
-    # Сначала получаем главную страницу для куков
+    # Получаем главную страницу для куков
     try:
         domain = urlparse(rss_url).netloc
         main_page_url = f"https://{domain}"
         session.get(main_page_url, timeout=10, headers=headers)
         logger.info(f"🍪 Получили куки с главной страницы: {domain}")
+        time.sleep(1)  # Задержка как у реального пользователя
     except:
         pass
 
-    # Затем получаем RSS
-    response = session.get(rss_url, timeout=15, headers=headers)
+    # Получаем RSS
+    response = session.get(rss_url, timeout=20, headers=headers)
+    response.raise_for_status()
+    return feedparser.parse(response.content)
+
+def parse_with_referer_spoof(rss_url):
+    """Парсинг с подменой реферера"""
+    domain = urlparse(rss_url).netloc
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': f'https://{domain}/',
+        'Origin': f'https://{domain}',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+    }
+
+    response = requests.get(rss_url, timeout=20, headers=headers)
     response.raise_for_status()
     return feedparser.parse(response.content)
 
 def format_message(entry, rss_url):
-    """Форматирует сообщение: невидимая ссылка → заголовок (если переведен)"""
-    translated_title, was_translated = translate_text(entry.title)
+    """Форматирует сообщение с HTML разметкой"""
+    try:
+        # Проверяем что есть заголовок и ссылка
+        if not entry.title or not entry.link:
+            logger.error(f"❌ Отсутствует заголовок или ссылка в записи")
+            return None
 
-    # Невидимая ссылка (U+200E - left-to-right mark)
-    invisible_link = f"[‎]({entry.link})"
+        translated_title, was_translated = translate_text(entry.title)
 
-    # Только невидимая ссылка и заголовок для переведенных
-    if was_translated:
-        return f"{invisible_link}\n{translated_title}\n{invisible_link}"
-    else:
-        # Для непереведенных - только невидимая ссылка
-        return f"{invisible_link}"
+        # Fallback: если перевод не удался, используем оригинальный заголовок
+        if not translated_title or translated_title.strip() == "":
+            translated_title = entry.title
+            was_translated = False
+
+        # HTML разметка с невидимой ссылкой
+        invisible_link = f'<a href="{entry.link}">‎</a>'
+
+        # Для переведенных: невидимая ссылка + заголовок + пустая строка
+        if was_translated:
+            message = f"{invisible_link}\n{translated_title}\n"
+        else:
+            # Для непереведенных: только невидимая ссылка
+            message = f"{invisible_link}"
+
+        # Проверяем что сообщение не пустое
+        if not message or message.strip() == "":
+            # Fallback: простой текст с ссылкой
+            message = f"{translated_title}\n{entry.link}"
+            logger.warning(f"⚠️ Используем fallback формат для: {entry.title}")
+
+        return message
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка форматирования сообщения: {e}")
+        # Fallback: минимальное сообщение
+        return f"{entry.title}\n{entry.link}"
 
 def send_to_telegram(message):
-    """Отправляет сообщение в Telegram"""
+    """Отправляет сообщение в Telegram с HTML разметкой"""
+    # Проверяем что сообщение не пустое
+    if not message or message.strip() == "":
+        logger.error("❌ Попытка отправить пустое сообщение")
+        return False
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
-        'parse_mode': 'Markdown',
+        'parse_mode': 'HTML',
         'disable_web_page_preview': False
     }
 
@@ -199,17 +276,29 @@ def rss_check_loop():
                     latest = feed.entries[0]
                     last_links[url] = latest.link
                     logger.info(f"✅ Инициализирована лента: {urlparse(url).netloc}")
+                else:
+                    logger.warning(f"⚠️ Не удалось инициализировать ленту: {url}")
             except Exception as e:
                 logger.error(f"❌ Ошибка инициализации {url}: {e}")
 
-    logger.info(f"✅ Инициализация завершена. Отслеживается {len(last_links)} лент")
+    successful_feeds = len(last_links)
+    logger.info(f"✅ Инициализация завершена. Успешно инициализировано {successful_feeds}/{len(RSS_FEED_URLS)} лент")
+
+    if successful_feeds == 0:
+        logger.error("❌ Ни одна лента не инициализирована! Проверьте RSS ссылки и подключение.")
+
     logger.info("⏰ Ожидание 15 минут до первой проверки...")
     time.sleep(900)
 
     while True:
         try:
+            successful_checks = 0
             for url in RSS_FEED_URLS:
                 try:
+                    # Пропускаем ленты, которые не удалось инициализировать
+                    if url not in last_links:
+                        continue
+
                     # Парсим RSS-ленту
                     feed = robust_parse_feed(url)
 
@@ -218,43 +307,42 @@ def rss_check_loop():
                         logger.warning(f"⚠️ Нет новостей в ленте: {url}")
                         continue
 
+                    successful_checks += 1
                     latest = feed.entries[0]
                     link = latest.link
 
-                    # Если это первая проверка - сохраняем ссылку
-                    if not last_links:
-                        last_links[url] = link
-                        continue
-
                     # Проверяем есть ли новая новость
-                    if url in last_links:
-                        if last_links[url] != link:
-                            domain = urlparse(url).netloc
-                            logger.info(f"🎉 Новая новость из: {domain}")
-                            logger.info(f"📰 Заголовок: {latest.title}")
+                    if last_links[url] != link:
+                        domain = urlparse(url).netloc
+                        logger.info(f"🎉 Новая новость из: {domain}")
+                        logger.info(f"📰 Заголовок: {latest.title}")
 
-                            # Отправляем сообщение
-                            if send_to_telegram(format_message(latest, url)):
-                                # Обновляем последнюю ссылку
-                                last_links[url] = link
-                                logger.info(f"✅ Новость отправлена и ссылка обновлена: {link}")
+                        # Форматируем сообщение
+                        message = format_message(latest, url)
+                        if not message:
+                            logger.error(f"❌ Не удалось сформировать сообщение для: {latest.title}")
+                            continue
 
-                                # Задержка между отправками
-                                logger.info("⏸️ Задержка 10 секунд перед следующей отправкой...")
-                                time.sleep(10)
-                            else:
-                                logger.error(f"❌ Не удалось отправить новость: {link}")
+                        # Отправляем сообщение
+                        if send_to_telegram(message):
+                            # Обновляем последнюю ссылку
+                            last_links[url] = link
+                            logger.info(f"✅ Новость отправлена и ссылка обновлена")
+
+                            # Задержка между отправками
+                            logger.info("⏸️ Задержка 10 секунд перед следующей отправкой...")
+                            time.sleep(10)
+                        else:
+                            logger.error(f"❌ Не удалось отправить новость")
                     else:
-                        # Добавляем новую ленту в отслеживание
-                        last_links[url] = link
-                        logger.info(f"📝 Добавлена новая лента в отслеживание: {url}")
+                        logger.debug(f"⏩ Нет новых новостей в {domain}")
 
                 except Exception as e:
                     logger.error(f"💥 Ошибка при обработке {url}: {e}")
                     continue
 
-            # Ждем 15 минут перед следующей проверкой
-            logger.info(f"✅ Проверка завершена. Жду 15 минут... ({datetime.now().strftime('%H:%M:%S')})")
+            logger.info(f"✅ Проверка завершена. Успешно проверено {successful_checks}/{len(RSS_FEED_URLS)} лент")
+            logger.info(f"⏰ Жду 15 минут до следующей проверки... ({datetime.now().strftime('%H:%M:%S')})")
             time.sleep(900)  # 900 секунд = 15 минут
 
         except Exception as e:
