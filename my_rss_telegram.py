@@ -8,6 +8,8 @@ import time
 import logging
 from dotenv import load_dotenv
 import re
+from datetime import datetime
+import calendar
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,9 +28,25 @@ if not all([BOT_TOKEN, CHANNEL_ID, RSS_FEED_URLS]):
     logger.error("❌ Отсутствуют необходимые переменные окружения!")
     exit(1)
 
-# ОПТИМИЗИРОВАННО: Храним только текущие свежие ссылки для каждой ленты
-current_links = {}  # Формат: {'rss_url': 'latest_link'}
+# ОПТИМИЗИРОВАННО: Храним текущие ссылки И даты публикаций
+current_items = {}  # Формат: {'rss_url': {'link': 'latest_link', 'published': timestamp}}
 first_run = True
+
+def parse_date(date_string):
+    """Парсит дату из RSS в timestamp"""
+    if not date_string:
+        return None
+
+    try:
+        # Пробуем разные форматы дат
+        time_tuple = feedparser._parse_date(date_string)
+        if time_tuple:
+            return calendar.timegm(time_tuple)
+    except:
+        pass
+
+    # Fallback: текущее время
+    return time.time()
 
 def robust_parse_feed(rss_url):
     """Многоуровневый парсинг с fallback-методами"""
@@ -112,42 +130,19 @@ def translate_text(text):
         logger.warning(f"Ошибка перевода: {e}")
         return text, False
 
-def get_hashtag(rss_url):
-    """Генерирует хэштег на основе домена"""
-    try:
-        from urllib.parse import urlparse
-        domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0]
-        return f"#{domain}"
-    except:
-        return "#news"
-
-def is_hashtag_text(text):
-    """Проверяет, является ли текст набором хэштегов"""
-    if not text:
-        return False
-    words = text.split()
-    hashtag_words = [word for word in words if word.startswith('#')]
-    return len(hashtag_words) > 0 and len(hashtag_words) / len(words) > 0.5
-
 def format_message(entry, rss_url):
-    """Форматирует сообщение: невидимая ссылка → хэштег и автор → пробел → превью"""
+    """Форматирует сообщение: невидимая ссылка → заголовок (если переведен)"""
     translated_title, was_translated = translate_text(entry.title)
 
-    # ИСПРАВЛЕНО: Невидимая ссылка БЕЗ пробела в начале
-    invisible_link = f"[‎]({entry.link})"  # U+200E (left-to-right mark)
+    # Невидимая ссылка (U+200E - left-to-right mark)
+    invisible_link = f"[‎]({entry.link})"
 
-    hashtag = get_hashtag(rss_url)
-
-    if hasattr(entry, 'author') and entry.author and not is_hashtag_text(entry.author):
-        meta_line = f"🏷️ {hashtag} • 👤 {entry.author}"
-    else:
-        meta_line = f"🏷️ {hashtag}"
-
-    # ИСПРАВЛЕНО: Структура: ссылка → хэштег и автор → пробел → превью
+    # Только невидимая ссылка и заголовок для переведенных
     if was_translated:
-        return f"{invisible_link}\n{translated_title}\n{invisible_link}\n{meta_line}\n{invisible_link}"
+        return f"{invisible_link}\n{translated_title}\n{invisible_link}"
     else:
-        return f"{invisible_link}\n{meta_line}\n{invisible_link}"
+        # Для непереведенных - только невидимая ссылка
+        return f"{invisible_link}"
 
 def send_to_telegram(message):
     """Отправляет сообщение в Telegram"""
@@ -170,47 +165,83 @@ def send_to_telegram(message):
         logger.error(f"❌ Ошибка: {e}")
         return False
 
-def parse_feed(rss_url):
-    """Парсит RSS ленту с улучшенной обработкой ошибок"""
-    return robust_parse_feed(rss_url)
+def is_new_entry(entry, saved_item):
+    """
+    Определяет, является ли запись новой.
+    Сравнивает сначала по дате, потом по ссылке.
+    """
+    if not saved_item:
+        return True
 
-def initialize_current_links():
-    """Инициализация при первом запуске - запоминаем текущие ссылки"""
-    global current_links, first_run
+    current_published = parse_date(entry.get('published', entry.get('updated')))
+    saved_published = saved_item.get('published')
 
-    logger.info("🚀 Первый запуск - инициализация текущих ссылок...")
+    # Если есть даты публикаций, сравниваем их
+    if current_published and saved_published:
+        if current_published > saved_published:
+            logger.info(f"📅 Новая запись по дате: {current_published} > {saved_published}")
+            return True
+        elif current_published < saved_published:
+            logger.info(f"📅 Старая запись по дате: {current_published} < {saved_published}")
+            return False
+        # Если даты равны, сравниваем по ссылкам
+        else:
+            if entry.link != saved_item.get('link'):
+                logger.info("🔗 Разные ссылки при одинаковой дате")
+                return True
+
+    # Fallback: сравниваем только по ссылкам если нет дат
+    elif entry.link != saved_item.get('link'):
+        logger.info("🔗 Новая запись по ссылке (даты недоступны)")
+        return True
+
+    return False
+
+def initialize_current_items():
+    """Инициализация при первом запуске - запоминаем текущие записи"""
+    global current_items, first_run
+
+    logger.info("🚀 Первый запуск - инициализация текущих записей...")
 
     for rss_url in RSS_FEED_URLS:
-        feed = parse_feed(rss_url)
+        feed = robust_parse_feed(rss_url)
         if feed and feed.entries:
-            latest_link = feed.entries[0].link
-            current_links[rss_url] = latest_link
-            logger.info(f"📝 Запомнили для {rss_url}: {latest_link}")
+            latest_entry = feed.entries[0]
+            latest_published = parse_date(latest_entry.get('published', latest_entry.get('updated')))
+
+            current_items[rss_url] = {
+                'link': latest_entry.link,
+                'published': latest_published
+            }
+
+            logger.info(f"📝 Запомнили для {rss_url}: {latest_entry.link} (дата: {latest_published})")
 
     first_run = False
-    logger.info(f"✅ Инициализация завершена. Запомнено {len(current_links)} текущих ссылок")
+    logger.info(f"✅ Инициализация завершена. Запомнено {len(current_items)} текущих записей")
 
 def check_feed(rss_url):
-    """Проверяет RSS ленту на новые записи - сравниваем с сохраненной ссылкой"""
-    global current_links
+    """Проверяет RSS ленту на новые записи с учетом дат и ссылок"""
+    global current_items
 
-    feed = parse_feed(rss_url)
+    feed = robust_parse_feed(rss_url)
     if not feed or not feed.entries:
         return 0
 
     latest_entry = feed.entries[0]
-    latest_link = latest_entry.link
-    saved_link = current_links.get(rss_url)
+    saved_item = current_items.get(rss_url)
 
-    # Сравниваем текущую ссылку с сохраненной для ЭТОЙ ленты
-    if latest_link != saved_link:
+    # Проверяем, является ли запись новой
+    if is_new_entry(latest_entry, saved_item):
         logger.info(f"🆕 Новая запись в {rss_url}: {latest_entry.title}")
 
         if send_to_telegram(format_message(latest_entry, rss_url)):
-            # ОБНОВЛЯЕМ только ссылку для этой ленты
-            current_links[rss_url] = latest_link
-            logger.info(f"🔄 Обновили ссылку для {rss_url}")
-            time.sleep(8)
+            # Обновляем и ссылку, и дату публикации
+            current_items[rss_url] = {
+                'link': latest_entry.link,
+                'published': parse_date(latest_entry.get('published', latest_entry.get('updated')))
+            }
+            logger.info(f"🔄 Обновили данные для {rss_url}")
+            time.sleep(8)  # Задержка между отправками
             return 1
     else:
         logger.info(f"⏩ Нет новых записей в {rss_url}")
@@ -222,7 +253,7 @@ def rss_check_loop():
     global first_run
 
     if first_run:
-        initialize_current_links()
+        initialize_current_items()
         logger.info("⏰ Ожидание 15 минут до первой проверки...")
         time.sleep(900)
 
@@ -257,6 +288,16 @@ def health():
 @app.route('/ping')
 def ping():
     return 'pong'
+
+@app.route('/status')
+def status():
+    """Статус бота с информацией о текущих отслеживаемых записях"""
+    status_info = {
+        'feeds_count': len(RSS_FEED_URLS),
+        'tracked_items': len(current_items),
+        'current_items': current_items
+    }
+    return status_info
 
 if __name__ == '__main__':
     logger.info("🤖 Запуск RSS бота...")
