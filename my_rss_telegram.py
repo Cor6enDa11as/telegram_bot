@@ -125,7 +125,7 @@ def parse_with_session(rss_url):
     return feedparser.parse(response.content)
 
 def format_message(entry, rss_url):
-    """Форматирует сообщение в Markdown"""
+    """Форматирует сообщение с кликабельным заголовком и отступами"""
     try:
         if not entry.title or not entry.link:
             return None
@@ -134,26 +134,17 @@ def format_message(entry, rss_url):
 
         if not translated_title or translated_title.strip() == "":
             translated_title = entry.title
-            was_translated = False
 
-        # Невидимая ссылка с пробелом
-        invisible_link = f"[ ]({entry.link})"
-
-        if was_translated:
-            message = f"{invisible_link}\n{translated_title}\n{invisible_link}"
-        else:
-            message = f"{invisible_link}"
-
-        if not message or message.strip() == "":
-            message = f" \n{entry.link}"
+        # Формат: неразрывные пробелы для отступа + кликабельный заголовок
+        message = f"   \n[{translated_title}]({entry.link})\n   "
 
         return message
 
     except Exception as e:
-        return f"[ ]({entry.link})"
+        return f"   \n[{entry.title}]({entry.link})\n   "
 
 def send_to_telegram(message):
-    """Отправляет сообщение в Telegram"""
+    """Отправляет сообщение в Telegram с Markdown разметкой"""
     if not message or message.strip() == "":
         return False
 
@@ -167,16 +158,7 @@ def send_to_telegram(message):
 
     try:
         response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            return True
-        else:
-            # Пробуем отправить без разметки
-            payload['parse_mode'] = None
-            clean_message = " " + f"\n{entry.link}" if hasattr(entry, 'link') else " "
-            payload['text'] = clean_message
-
-            response2 = requests.post(url, json=payload, timeout=10)
-            return response2.status_code == 200
+        return response.status_code == 200
     except:
         return False
 
