@@ -86,11 +86,20 @@ def translate_text(text):
 def robust_parse_feed(rss_url):
     """Улучшенный парсинг RSS с обходом защиты"""
     methods = [
-        lambda: parse_with_advanced_headers(rss_url),
-        lambda: parse_with_rotating_agents(rss_url),
-        lambda: parse_with_browser_emulation(rss_url),
-        lambda: parse_with_referer_spoof(rss_url),
-        lambda: feedparser.parse(rss_url),  # Последняя попытка - стандартный метод
+        # Метод 1: Стандартный парсинг
+        lambda: feedparser.parse(rss_url),
+
+        # Метод 2: Requests с реалистичными заголовками
+        lambda: parse_with_realistic_headers(rss_url),
+
+        # Метод 3: Requests с сессией
+        lambda: parse_with_session(rss_url),
+
+        # Метод 4: С мобильными заголовками
+        lambda: parse_with_mobile_headers(rss_url),
+
+        # Метод 5: С рандомными User-Agent
+        lambda: parse_with_random_agents(rss_url),
     ]
 
     for i, method in enumerate(methods):
@@ -107,96 +116,94 @@ def robust_parse_feed(rss_url):
     logger.error(f"❌ Все методы парсинга не сработали для {rss_url}")
     return None
 
-def parse_with_advanced_headers(rss_url):
-    """Парсинг с продвинутыми заголовками"""
+def parse_with_realistic_headers(rss_url):
+    """Парсинг с реалистичными заголовками браузера"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/rss+xml, application/xml, text/xml, */*; q=0.01',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'DNT': '1',
-        'Sec-GPC': '1',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
-    }
-
-    response = requests.get(rss_url, timeout=25, headers=headers)
-    response.raise_for_status()
-    return feedparser.parse(response.content)
-
-def parse_with_rotating_agents(rss_url):
-    """Парсинг с ротацией User-Agent"""
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    ]
-
-    headers = {
-        'User-Agent': random.choice(user_agents),
         'Accept': 'application/rss+xml, application/xml, text/xml, */*',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
         'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
     }
 
     response = requests.get(rss_url, timeout=20, headers=headers)
     response.raise_for_status()
     return feedparser.parse(response.content)
 
-def parse_with_browser_emulation(rss_url):
-    """Парсинг с эмуляцией браузера через сессию"""
+def parse_with_session(rss_url):
+    """Парсинг с сессией и куками"""
     session = requests.Session()
 
-    # Основные заголовки
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'no-cache',
     }
 
-    # Получаем главную страницу для куков
+    # Сначала получаем главную страницу для куков
     try:
         domain = urlparse(rss_url).netloc
         main_page_url = f"https://{domain}"
         session.get(main_page_url, timeout=10, headers=headers)
         logger.info(f"🍪 Получили куки с главной страницы: {domain}")
-        time.sleep(1)  # Задержка как у реального пользователя
     except:
         pass
 
-    # Получаем RSS
-    response = session.get(rss_url, timeout=20, headers=headers)
+    # Затем получаем RSS
+    response = session.get(rss_url, timeout=15, headers=headers)
     response.raise_for_status()
     return feedparser.parse(response.content)
 
-def parse_with_referer_spoof(rss_url):
-    """Парсинг с подменой реферера"""
-    domain = urlparse(rss_url).netloc
+def parse_with_mobile_headers(rss_url):
+    """Парсинг с мобильными заголовками"""
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
         'Accept': 'application/rss+xml, application/xml, text/xml, */*',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': f'https://{domain}/',
-        'Origin': f'https://{domain}',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
+        'X-Requested-With': 'XMLHttpRequest',
     }
 
     response = requests.get(rss_url, timeout=20, headers=headers)
     response.raise_for_status()
     return feedparser.parse(response.content)
 
+def parse_with_random_agents(rss_url):
+    """Парсинг с рандомными User-Agent"""
+    user_agents = [
+        # Chrome Windows
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        # Firefox Windows
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+        # Safari Mac
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+        # Edge
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+        # Opera
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 OPR/106.0.0.0',
+    ]
+
+    for ua in user_agents:
+        try:
+            headers = {
+                'User-Agent': ua,
+                'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            }
+            # Добавляем небольшую задержку между попытками
+            time.sleep(0.5)
+
+            response = requests.get(rss_url, timeout=15, headers=headers)
+            response.raise_for_status()
+            feed = feedparser.parse(response.content)
+            if feed and feed.entries:
+                return feed
+        except Exception as e:
+            continue
+
+    return None
+
 def format_message(entry, rss_url):
-    """Форматирует сообщение с HTML разметкой"""
+    """Форматирует сообщение с точкой как видимым текстом"""
     try:
         # Проверяем что есть заголовок и ссылка
         if not entry.title or not entry.link:
@@ -210,14 +217,14 @@ def format_message(entry, rss_url):
             translated_title = entry.title
             was_translated = False
 
-        # HTML разметка с невидимой ссылкой
-        invisible_link = f'<a href="{entry.link}">‎</a>'
+        # Используем точку как минимальный видимый текст
+        invisible_link = f'<a href="{entry.link}">.</a>'
 
-        # Для переведенных: невидимая ссылка + заголовок + пустая строка
+        # Для переведенных: невидимая ссылка + заголовок
         if was_translated:
-            message = f"{invisible_link}\n{translated_title}\n"
+            message = f"{invisible_link}\n{translated_title}\n{invisible_link}"
         else:
-            # Для непереведенных: только невидимая ссылка
+            # Для непереведенных - только невидимая ссылка
             message = f"{invisible_link}"
 
         # Проверяем что сообщение не пустое
@@ -231,7 +238,7 @@ def format_message(entry, rss_url):
     except Exception as e:
         logger.error(f"❌ Ошибка форматирования сообщения: {e}")
         # Fallback: минимальное сообщение
-        return f"{entry.title}\n{entry.link}"
+        return f'<a href="{entry.link}">.</a>'
 
 def send_to_telegram(message):
     """Отправляет сообщение в Telegram с HTML разметкой"""
