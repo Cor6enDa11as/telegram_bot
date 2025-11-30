@@ -125,35 +125,45 @@ def parse_with_session(rss_url):
     return feedparser.parse(response.content)
 
 def format_message(entry, rss_url):
-    """Форматирует сообщение с кликабельным заголовком и отступами"""
+    """Форматирует сообщение - только заголовок если переведен"""
     try:
         if not entry.title or not entry.link:
             return None
 
         translated_title, was_translated = translate_text(entry.title)
 
-        if not translated_title or translated_title.strip() == "":
-            translated_title = entry.title
-
-        # Формат: неразрывные пробелы для отступа + кликабельный заголовок
-        message = f"   \n[{translated_title}]({entry.link})\n   "
-
-        return message
+        # Возвращаем заголовок только если был перевод
+        if was_translated:
+            return f"   \n{translated_title}\n   "
+        else:
+            # Для непереведенных - пустое сообщение с отступами
+            return "   \n   "
 
     except Exception as e:
-        return f"   \n[{entry.title}]({entry.link})\n   "
+        return "   \n   "
 
-def send_to_telegram(message):
-    """Отправляет сообщение в Telegram с Markdown разметкой"""
-    if not message or message.strip() == "":
+def send_to_telegram(message, entry_link, rss_url, entry_title):
+    """Отправляет сообщение в Telegram с кнопками"""
+    if not message:
         return False
+
+    # Генерируем хэштег на основе домена
+    domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0]
+    hashtag = f"#{domain}"
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
-        'parse_mode': 'Markdown',
-        'disable_web_page_preview': False
+        'parse_mode': None,
+        'disable_web_page_preview': True,
+        'disable_notification': False,
+        'reply_markup': {
+            'inline_keyboard': [[
+                {'text': '📖 Читать статью', 'url': entry_link},
+                {'text': hashtag, 'url': f"https://t.me/{CHANNEL_ID.replace('@', '')}?q={hashtag}"}
+            ]]
+        }
     }
 
     try:
@@ -205,7 +215,7 @@ def rss_check_loop():
                         if not message:
                             continue
 
-                        if send_to_telegram(message):
+                        if send_to_telegram(message, latest.link, url, latest.title):
                             last_links[url] = link
                             time.sleep(10)
                         else:
