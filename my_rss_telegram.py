@@ -125,7 +125,7 @@ def parse_with_session(rss_url):
     return feedparser.parse(response.content)
 
 def format_message(entry, rss_url):
-    """Форматирует сообщение - только заголовок если переведен"""
+    """Форматирует сообщение: заголовок + ссылка для переведенных, только ссылка для английских"""
     try:
         if not entry.title or not entry.link:
             logger.error(f"❌ Отсутствует заголовок или ссылка")
@@ -133,28 +133,28 @@ def format_message(entry, rss_url):
 
         translated_title, was_translated = translate_text(entry.title)
 
-        # Возвращаем заголовок только если был перевод
         if was_translated:
-            message = f"   \n{translated_title}\n   "
-            logger.info(f"📝 Сформирован заголовок: {translated_title[:50]}...")
+            # Для переведенных: заголовок + ссылка
+            message = f"\n{translated_title}\n{entry.link}\n"
+            logger.info(f"📝 Сформирован переведенный заголовок")
         else:
-            # Для непереведенных - пустое сообщение с отступами
-            message = "   \n   "
-            logger.info("📝 Сообщение без заголовка (не переведено)")
+            # Для английских: просто ссылка
+            message = f"\n{entry.link}\n"
+            logger.info("📝 Сформирована только ссылка (не переведено)")
 
         return message
 
     except Exception as e:
         logger.error(f"❌ Ошибка форматирования: {e}")
-        return "   \n   "
+        return f"\n{entry.link}\n"
 
 def send_to_telegram(message, entry_link, rss_url, entry_title):
-    """Отправляет сообщение в Telegram с кнопками"""
+    """Отправляет сообщение в Telegram с кнопкой хэштега"""
     if not message:
         logger.error("❌ Пустое сообщение")
         return False
 
-    # Генерируем хэштег на основе домена
+    # Генерируем хэштег
     try:
         domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0]
         hashtag = f"#{domain}"
@@ -163,24 +163,20 @@ def send_to_telegram(message, entry_link, rss_url, entry_title):
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    # Создаем клавиатуру
-    keyboard = {
-        'inline_keyboard': [[
-            {'text': '📖 Читать статью', 'url': entry_link},
-            {'text': hashtag, 'url': f"https://t.me/{CHANNEL_ID.replace('@', '')}?q={hashtag}"}
-        ]]
-    }
-
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
-        'disable_web_page_preview': True,
+        'disable_web_page_preview': False,
         'disable_notification': False,
-        'reply_markup': keyboard
+        'reply_markup': {
+            'inline_keyboard': [[
+                {'text': hashtag, 'url': f"https://t.me/{CHANNEL_ID.replace('@', '')}?q={hashtag}"}
+            ]]
+        }
     }
 
     try:
-        logger.info(f"📤 Отправка сообщения с ссылкой: {entry_link}")
+        logger.info(f"📤 Отправка сообщения: {message[:50]}...")
         response = requests.post(url, json=payload, timeout=10)
 
         if response.status_code == 200:
@@ -190,18 +186,11 @@ def send_to_telegram(message, entry_link, rss_url, entry_title):
             logger.error(f"❌ Ошибка отправки: {response.status_code}")
             logger.error(f"❌ Текст ошибки: {response.text}")
 
-            # Пробуем отправить без кнопок
-            logger.info("🔄 Пробуем отправить без кнопок...")
-            payload_without_buttons = payload.copy()
-            payload_without_buttons.pop('reply_markup', None)
-            payload_without_buttons['text'] = f"{message}\n\n{entry_link}"
-
-            response2 = requests.post(url, json=payload_without_buttons, timeout=10)
-            if response2.status_code == 200:
-                logger.info("✅ Сообщение отправлено без кнопок")
-                return True
-
-            return False
+            # Пробуем без кнопки если не работает
+            payload.pop('reply_markup', None)
+            logger.info("🔄 Пробуем отправить без кнопки...")
+            response2 = requests.post(url, json=payload, timeout=10)
+            return response2.status_code == 200
 
     except Exception as e:
         logger.error(f"❌ Ошибка соединения: {e}")
