@@ -30,49 +30,6 @@ if not all([BOT_TOKEN, CHANNEL_ID, RSS_FEED_URLS]):
 # Словарь для отслеживания последних новостей
 last_links = {}
 
-def should_translate_text(text):
-    """Определяет, нужно ли переводить текст"""
-    if not text or not text.strip():
-        return False
-
-    if re.search('[а-яА-Я]', text):
-        total_letters = len([c for c in text if c.isalpha()])
-        if total_letters == 0:
-            return False
-
-        cyrillic_count = len([c for c in text if re.match('[а-яА-Я]', c)])
-        cyrillic_ratio = cyrillic_count / total_letters
-
-        if total_letters < 3:
-            return False
-
-        return cyrillic_ratio <= 0.3
-
-    return True
-
-def translate_text(text):
-    """Переводит текст на русский язык"""
-    try:
-        if not should_translate_text(text):
-            return text, False
-
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {
-            'client': 'gtx',
-            'sl': 'auto',
-            'tl': 'ru',
-            'dt': 't',
-            'q': text
-        }
-        response = requests.get(url, params=params, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            translated = ''.join([item[0] for item in data[0] if item[0]])
-            return translated, True
-        return text, False
-    except Exception as e:
-        return text, False
-
 def robust_parse_feed(rss_url):
     """Парсинг RSS с обходом защиты"""
     methods = [
@@ -125,41 +82,27 @@ def parse_with_session(rss_url):
     return feedparser.parse(response.content)
 
 def format_message(entry, rss_url):
-    """Форматирует сообщение: заголовок + ссылка для переведенных, только ссылка для английских"""
+    """Форматирует сообщение: просто ссылка и хэштег"""
     try:
-        if not entry.title or not entry.link:
-            logger.error(f"❌ Отсутствует заголовок или ссылка")
+        if not entry.link:
             return None
 
-        translated_title, was_translated = translate_text(entry.title)
+        # Генерируем хэштег
+        domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0]
+        hashtag = f"#{domain}"
 
-        if was_translated:
-            # Для переведенных: заголовок + ссылка
-            message = f"\n{translated_title}\n{entry.link}\n"
-            logger.info(f"📝 Сформирован переведенный заголовок")
-        else:
-            # Для английских: просто ссылка
-            message = f"\n{entry.link}\n"
-            logger.info("📝 Сформирована только ссылка (не переведено)")
+        # Просто ссылка и хэштег
+        message = f"{entry.link}\n\n{hashtag}"
 
         return message
 
     except Exception as e:
-        logger.error(f"❌ Ошибка форматирования: {e}")
-        return f"\n{entry.link}\n"
+        return f"{entry.link}\n\n#news"
 
-def send_to_telegram(message, entry_link, rss_url, entry_title):
-    """Отправляет сообщение в Telegram с кнопкой хэштега"""
+def send_to_telegram(message):
+    """Отправляет сообщение в Telegram"""
     if not message:
-        logger.error("❌ Пустое сообщение")
         return False
-
-    # Генерируем хэштег
-    try:
-        domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0]
-        hashtag = f"#{domain}"
-    except:
-        hashtag = "#news"
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
@@ -167,33 +110,13 @@ def send_to_telegram(message, entry_link, rss_url, entry_title):
         'chat_id': CHANNEL_ID,
         'text': message,
         'disable_web_page_preview': False,
-        'disable_notification': False,
-        'reply_markup': {
-            'inline_keyboard': [[
-                {'text': hashtag, 'url': f"https://t.me/{CHANNEL_ID.replace('@', '')}?q={hashtag}"}
-            ]]
-        }
+        'disable_notification': False
     }
 
     try:
-        logger.info(f"📤 Отправка сообщения: {message[:50]}...")
         response = requests.post(url, json=payload, timeout=10)
-
-        if response.status_code == 200:
-            logger.info("✅ Сообщение отправлено успешно")
-            return True
-        else:
-            logger.error(f"❌ Ошибка отправки: {response.status_code}")
-            logger.error(f"❌ Текст ошибки: {response.text}")
-
-            # Пробуем без кнопки если не работает
-            payload.pop('reply_markup', None)
-            logger.info("🔄 Пробуем отправить без кнопки...")
-            response2 = requests.post(url, json=payload, timeout=10)
-            return response2.status_code == 200
-
-    except Exception as e:
-        logger.error(f"❌ Ошибка соединения: {e}")
+        return response.status_code == 200
+    except:
         return False
 
 def rss_check_loop():
@@ -239,7 +162,7 @@ def rss_check_loop():
                         if not message:
                             continue
 
-                        if send_to_telegram(message, latest.link, url, latest.title):
+                        if send_to_telegram(message):
                             last_links[url] = link
                             time.sleep(10)
                         else:
