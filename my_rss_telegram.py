@@ -174,7 +174,6 @@ def send_to_telegram(message, entry_link, rss_url, entry_title):
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
-        'parse_mode': None,
         'disable_web_page_preview': True,
         'disable_notification': False,
         'reply_markup': keyboard
