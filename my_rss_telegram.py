@@ -107,20 +107,35 @@ def get_news_image(entry, link, rss_url):
     return fallbacks.get(domain, fallbacks['default'])
 
 def send_via_telegraph(entry, rss_url):
+    # --- Надёжная очистка заголовка ---
     raw_title = entry.get('title', 'Новость').strip()
-    # Удаляем control-символы и обрезаем
+    # 1. Удаляем control-символы (часто скрыты в RSS)
     title = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', raw_title)
-    if len(title) > 250:
-        title = title[:250] + "..."
+    # 2. Заменяем проблемные символы на безопасные
+    title = re.sub(r'[|\\«»“”]', '-', title)
+    # 3. Убираем множественные дефисы и пробелы
+    title = re.sub(r'-+', '-', title)
+    title = re.sub(r'\s+', ' ', title)
+    # 4. Обрезаем до безопасного лимита (оставляем запас)
+    if len(title) > 240:
+        title = title[:240].rsplit(' ', 1)[0] + "..."
+    title = title.strip()
 
+    # Если после чистки заголовок пустой
+    if not title:
+        title = "Новость"
+
+    # --- Описание ---
     summary = extract_clean_text(entry.get('summary') or entry.get('description') or '')
     link = entry.get('link')
     if not link:
         logger.error("❌ Нет ссылки — пропуск")
         return False
 
+    # --- Получение картинки ---
     image_url = get_news_image(entry, link, rss_url)
 
+    # --- Формирование контента для Telegraph ---
     content = []
     if image_url:
         content.append({"tag": "img", "attrs": {"src": image_url}})
@@ -134,10 +149,10 @@ def send_via_telegraph(entry, rss_url):
         ]
     })
 
-    # Только разрешённые поля, author_name — латиница!
+    # --- Безопасный запрос к Telegraph API ---
     payload = {
         "title": title,
-        "author_name": "RSS Bot",
+        "author_name": "RSS Bot",  # Только латиница, ≤128 символов
         "content": content,
         "return_content": False
     }
@@ -146,17 +161,19 @@ def send_via_telegraph(entry, rss_url):
         resp = requests.post("https://api.telegra.ph/createPage", json=payload, timeout=10)
         data = resp.json()
         if not resp.ok or not data.get("ok"):
-            logger.error(f"❌ Telegraph error: {data.get('error', data)}")
+            logger.error(f"❌ Telegraph API error: {data.get('error', data)}")
             return False
         telegraph_url = data["result"]["url"]
     except Exception as e:
-        logger.error(f"❌ Telegraph exception: {e}")
+        logger.error(f"❌ Исключение при создании Telegraph-страницы: {e}")
         return False
 
+    # --- Формирование финального сообщения ---
     domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0].lower()
     hashtag = "#" + re.sub(r'[^a-zA-Z0-9а-яА-ЯёЁ]', '', domain)
     message = f"{telegraph_url}\n\n{title}\n\n{hashtag}"
 
+    # --- Отправка в Telegram ---
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
