@@ -35,7 +35,7 @@ def extract_clean_text(html):
 
 def fetch_rss_with_browser_headers(rss_url):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5..0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8',
         'Connection': 'keep-alive',
@@ -70,8 +70,7 @@ def get_news_image(entry, link, rss_url):
             img = entry.media_content[0].get('url')
             if img and img.startswith(('http://', 'https://')):
                 return img
-    except Exception as e:
-        logger.debug(f"media_content error: {e}")
+    except: pass
 
     # 2. enclosures
     try:
@@ -80,8 +79,7 @@ def get_news_image(entry, link, rss_url):
                 url = getattr(enc, 'href', getattr(enc, 'url', None))
                 if url and url.startswith(('http://', 'https://')):
                     return url
-    except Exception as e:
-        logger.debug(f"enclosures error: {e}")
+    except: pass
 
     # 3. og:image из HTML
     try:
@@ -95,8 +93,7 @@ def get_news_image(entry, link, rss_url):
                     img_url = urljoin(link, img_url)
                 if img_url.startswith('http'):
                     return img_url
-    except Exception as e:
-        logger.debug(f"og:image error: {e}")
+    except: pass
 
     # 4. fallback
     domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0].lower()
@@ -109,7 +106,7 @@ def get_news_image(entry, link, rss_url):
     }
     return fallbacks.get(domain, fallbacks['default'])
 
-def send_news_to_telegram(entry, rss_url):
+def send_via_telegraph(entry, rss_url):
     title = (entry.get('title') or 'Новость').strip()
     if len(title) > 250:
         title = title[:250] + "..."
@@ -122,28 +119,51 @@ def send_news_to_telegram(entry, rss_url):
 
     image_url = get_news_image(entry, link, rss_url)
 
+    # --- Создаём страницу на Telegraph ---
+    content = []
+    if image_url:
+        content.append({"tag": "img", "attrs": {"src": image_url}})
+    content.append({"tag": "p", "children": [summary]})
+    content.append({
+        "tag": "p",
+        "children": [
+            {"tag": "em", "children": ["Источник: "]},
+            {"tag": "a", "attrs": {"href": link}, "children": [link]}
+        ]
+    })
+
+    payload = {
+        "title": title,
+        "author_name": "RSS Bot",
+        "content": content,
+        "return_content": False
+    }
+
+    try:
+        resp = requests.post("https://api.telegra.ph/createPage", json=payload, timeout=10)
+        data = resp.json()
+        if not (resp.ok and data.get("ok")):
+            logger.error(f"❌ Telegraph error: {data.get('description', resp.text)}")
+            return False
+        telegraph_url = data["result"]["url"]
+    except Exception as e:
+        logger.error(f"❌ Telegraph exception: {e}")
+        return False
+
+    # --- Отправляем в формате: ссылка + заголовок + хэштег ---
     domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0].lower()
     hashtag = "#" + re.sub(r'[^a-zA-Z0-9а-яА-ЯёЁ]', '', domain)
-
-    caption_parts = [title]
-    if summary:
-        caption_parts.append(summary)
-    caption_parts.append(f"🔗 {link}")
-    caption_parts.append(hashtag)
-
-    caption = "\n\n".join(caption_parts)
-    if len(caption) > 1024:
-        caption = caption[:1021] + "..."
+    message = f"{telegraph_url}\n\n{title}\n\n{hashtag}"
 
     try:
         resp = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-            data={
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
                 'chat_id': CHANNEL_ID,
-                'photo': image_url,
-                'caption': caption
+                'text': message,
+                'disable_web_page_preview': False
             },
-            timeout=15
+            timeout=10
         )
         return resp.ok
     except Exception as e:
@@ -153,7 +173,7 @@ def send_news_to_telegram(entry, rss_url):
 def rss_check_loop():
     global last_links
 
-    logger.info("🚀 Запуск RSS бота (sendPhoto mode)")
+    logger.info("🚀 Запуск RSS бота (Telegraph preview mode)")
 
     for url in RSS_FEED_URLS:
         try:
@@ -178,7 +198,7 @@ def rss_check_loop():
 
                 if last_links.get(url) != link:
                     logger.info(f"🎉 Новая новость: {urlparse(url).netloc}")
-                    if send_news_to_telegram(latest, url):
+                    if send_via_telegraph(latest, url):
                         last_links[url] = link
                         time.sleep(5)
                     else:
@@ -192,7 +212,7 @@ def rss_check_loop():
 
 @app.route('/')
 def home():
-    return 'RSS Bot + Photo is running!'
+    return 'RSS Bot — Telegraph Preview Mode'
 
 if __name__ == '__main__':
     logger.info(f"📡 Отслеживается {len(RSS_FEED_URLS)} лент")
