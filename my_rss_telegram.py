@@ -35,7 +35,7 @@ def extract_clean_text(html):
 
 def fetch_rss_with_browser_headers(rss_url):
     headers = {
-        'User-Agent': 'Mozilla/5..0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8',
         'Connection': 'keep-alive',
@@ -107,7 +107,9 @@ def get_news_image(entry, link, rss_url):
     return fallbacks.get(domain, fallbacks['default'])
 
 def send_via_telegraph(entry, rss_url):
-    title = (entry.get('title') or 'Новость').strip()
+    raw_title = entry.get('title', 'Новость').strip()
+    # Удаляем control-символы и обрезаем
+    title = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', raw_title)
     if len(title) > 250:
         title = title[:250] + "..."
 
@@ -119,11 +121,11 @@ def send_via_telegraph(entry, rss_url):
 
     image_url = get_news_image(entry, link, rss_url)
 
-    # --- Создаём страницу на Telegraph ---
     content = []
     if image_url:
         content.append({"tag": "img", "attrs": {"src": image_url}})
-    content.append({"tag": "p", "children": [summary]})
+    if summary:
+        content.append({"tag": "p", "children": [summary]})
     content.append({
         "tag": "p",
         "children": [
@@ -132,6 +134,7 @@ def send_via_telegraph(entry, rss_url):
         ]
     })
 
+    # Только разрешённые поля, author_name — латиница!
     payload = {
         "title": title,
         "author_name": "RSS Bot",
@@ -142,15 +145,14 @@ def send_via_telegraph(entry, rss_url):
     try:
         resp = requests.post("https://api.telegra.ph/createPage", json=payload, timeout=10)
         data = resp.json()
-        if not (resp.ok and data.get("ok")):
-            logger.error(f"❌ Telegraph error: {data.get('description', resp.text)}")
+        if not resp.ok or not data.get("ok"):
+            logger.error(f"❌ Telegraph error: {data.get('error', data)}")
             return False
         telegraph_url = data["result"]["url"]
     except Exception as e:
         logger.error(f"❌ Telegraph exception: {e}")
         return False
 
-    # --- Отправляем в формате: ссылка + заголовок + хэштег ---
     domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0].lower()
     hashtag = "#" + re.sub(r'[^a-zA-Z0-9а-яА-ЯёЁ]', '', domain)
     message = f"{telegraph_url}\n\n{title}\n\n{hashtag}"
@@ -167,7 +169,7 @@ def send_via_telegraph(entry, rss_url):
         )
         return resp.ok
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки: {e}")
+        logger.error(f"❌ Ошибка отправки в Telegram: {e}")
         return False
 
 def rss_check_loop():
@@ -212,7 +214,7 @@ def rss_check_loop():
 
 @app.route('/')
 def home():
-    return 'RSS Bot — Telegraph Preview Mode'
+    return 'RSS Bot — Ready (Telegraph Preview)'
 
 if __name__ == '__main__':
     logger.info(f"📡 Отслеживается {len(RSS_FEED_URLS)} лент")
