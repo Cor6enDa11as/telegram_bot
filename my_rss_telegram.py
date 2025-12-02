@@ -2,6 +2,7 @@
 import os
 import feedparser
 import requests
+import certifi  # ← для исправления SSL на Render
 from flask import Flask
 from threading import Thread
 import time
@@ -64,7 +65,7 @@ def robust_parse_feed(rss_url):
     return None
 
 def get_news_image(entry, link, rss_url):
-    # 1. media:content
+    # 1. media:content (4PDA, GSM Arena)
     try:
         if hasattr(entry, 'media_content') and entry.media_content:
             img = entry.media_content[0].get('url')
@@ -95,47 +96,38 @@ def get_news_image(entry, link, rss_url):
                     return img_url
     except: pass
 
-    # 4. fallback
+    # 4. fallback-иконки
     domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0].lower()
     fallbacks = {
         '4pda': 'https://i.imgur.com/rKzB0yP.png',
         'opennet': 'https://i.imgur.com/5XJmVQl.png',
         'gsmarena': 'https://i.imgur.com/9WzFQ4a.png',
         'ixbt': 'https://i.imgur.com/mVQkD3v.png',
+        'habr': 'https://i.imgur.com/ZlZ3qDk.png',
         'default': 'https://i.imgur.com/3GtB4kP.png'
     }
     return fallbacks.get(domain, fallbacks['default'])
 
 def send_via_telegraph(entry, rss_url):
-    # --- Надёжная очистка заголовка ---
     raw_title = entry.get('title', 'Новость').strip()
-    # 1. Удаляем control-символы (часто скрыты в RSS)
+    # Очистка заголовка
     title = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', raw_title)
-    # 2. Заменяем проблемные символы на безопасные
-    title = re.sub(r'[|\\«»“”]', '-', title)
-    # 3. Убираем множественные дефисы и пробелы
+    title = re.sub(r'[|\\«»“”\[\]]', '-', title)
     title = re.sub(r'-+', '-', title)
-    title = re.sub(r'\s+', ' ', title)
-    # 4. Обрезаем до безопасного лимита (оставляем запас)
+    title = re.sub(r'\s+', ' ', title).strip()
+    if not title or len(title) < 2:
+        title = "Новость"
     if len(title) > 240:
         title = title[:240].rsplit(' ', 1)[0] + "..."
-    title = title.strip()
 
-    # Если после чистки заголовок пустой
-    if not title:
-        title = "Новость"
-
-    # --- Описание ---
     summary = extract_clean_text(entry.get('summary') or entry.get('description') or '')
     link = entry.get('link')
     if not link:
         logger.error("❌ Нет ссылки — пропуск")
         return False
 
-    # --- Получение картинки ---
     image_url = get_news_image(entry, link, rss_url)
 
-    # --- Формирование контента для Telegraph ---
     content = []
     if image_url:
         content.append({"tag": "img", "attrs": {"src": image_url}})
@@ -149,31 +141,34 @@ def send_via_telegraph(entry, rss_url):
         ]
     })
 
-    # --- Безопасный запрос к Telegraph API ---
     payload = {
         "title": title,
-        "author_name": "RSS Bot",  # Только латиница, ≤128 символов
+        "author_name": "RSS Bot",
         "content": content,
         "return_content": False
     }
 
     try:
-        resp = requests.post("https://api.telegra.ph/createPage", json=payload, timeout=10)
+        # 🔑 Ключевая строка: certifi.where()
+        resp = requests.post(
+            "https://api.telegra.ph/createPage",
+            json=payload,
+            timeout=10,
+            verify=certifi.where()
+        )
         data = resp.json()
         if not resp.ok or not data.get("ok"):
-            logger.error(f"❌ Telegraph API error: {data.get('error', data)}")
+            logger.error(f"❌ Telegraph ошибка: {data}")
             return False
         telegraph_url = data["result"]["url"]
     except Exception as e:
-        logger.error(f"❌ Исключение при создании Telegraph-страницы: {e}")
+        logger.error(f"❌ Исключение Telegraph: {e}")
         return False
 
-    # --- Формирование финального сообщения ---
     domain = urlparse(rss_url).netloc.replace('www.', '').split('.')[0].lower()
     hashtag = "#" + re.sub(r'[^a-zA-Z0-9а-яА-ЯёЁ]', '', domain)
     message = f"{telegraph_url}\n\n{title}\n\n{hashtag}"
 
-    # --- Отправка в Telegram ---
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
@@ -192,7 +187,7 @@ def send_via_telegraph(entry, rss_url):
 def rss_check_loop():
     global last_links
 
-    logger.info("🚀 Запуск RSS бота (Telegraph preview mode)")
+    logger.info("🚀 Запуск RSS бота (Telegraph + Telegram preview)")
 
     for url in RSS_FEED_URLS:
         try:
@@ -208,6 +203,10 @@ def rss_check_loop():
     while True:
         for url in RSS_FEED_URLS:
             try:
+                # Временно пропускаем GSM Arena из-за 503
+                if 'gsmarena.com' in url:
+                    continue
+
                 feed = robust_parse_feed(url)
                 if not feed or not feed.entries:
                     continue
@@ -231,9 +230,9 @@ def rss_check_loop():
 
 @app.route('/')
 def home():
-    return 'RSS Bot — Ready (Telegraph Preview)'
+    return 'RSS Bot — Telegram Preview Mode (Telegraph + certifi)'
 
 if __name__ == '__main__':
-    logger.info(f"📡 Отслеживается {len(RSS_FEED_URLS)} лент")
+    logger.info(f"📡 Отслеживается {len(RSS_FEED_URLS)} лент (GSM Arena временно отключён)")
     Thread(target=rss_check_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
