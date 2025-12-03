@@ -9,14 +9,6 @@ import logging
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 
-# Попытка импорта cloudscraper
-try:
-    import cloudscraper
-    HAS_CLOUDSCRAPER = True
-except ImportError:
-    HAS_CLOUDSCRAPER = False
-    logging.warning("cloudscraper не установлен — 4pda может не работать")
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -43,81 +35,39 @@ def build_headers(rss_url):
         'Connection': 'keep-alive',
     }
 
-def parse_with_requests(rss_url):
-    headers = build_headers(rss_url)
-    resp = requests.get(rss_url, timeout=25, headers=headers)
-    resp.raise_for_status()
-    return feedparser.parse(resp.content)
-
-def parse_with_cloudscraper(rss_url):
-    scraper = cloudscraper.create_scraper(
-        browser={'browser': 'chrome', 'platform': 'linux', 'mobile': False}
-    )
-    headers = build_headers(rss_url)
-    resp = scraper.get(rss_url, timeout=25, headers=headers)
-    resp.raise_for_status()
-    return feedparser.parse(resp.content)
-
-def parse_with_session(rss_url):
-    session = requests.Session()
-    domain = urlparse(rss_url).netloc
+def robust_parse_feed(rss_url):
     headers = build_headers(rss_url)
     try:
-        session.get(f'https://{domain}', timeout=10, headers=headers)
-    except:
-        pass
-    resp = session.get(rss_url, timeout=20, headers=headers)
-    resp.raise_for_status()
-    return feedparser.parse(resp.content)
-
-def robust_parse_feed(rss_url):
-    methods = [
-        parse_with_requests,
-        (parse_with_cloudscraper if HAS_CLOUDSCRAPER else None),
-        parse_with_session
-    ]
-
-    for method in methods:
-        if method is None:
-            continue
-        try:
-            feed = method(rss_url)
-            if feed and hasattr(feed, 'entries') and feed.entries:
-                # Дополнительная проверка: не HTML-ли это (например, Cloudflare)
-                first = feed.entries[0]
-                if '<html' in str(feed).lower() or 'cloudflare' in str(feed).lower():
-                    raise ValueError("Получен HTML вместо RSS")
-                return feed
-        except Exception as e:
-            logger.debug(f"Метод {method.__name__} не сработал для {rss_url}: {e}")
-            continue
-    logger.error(f"❌ Все методы парсинга провалились для: {rss_url}")
+        response = requests.get(rss_url, timeout=25, headers=headers)
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
+        if feed and hasattr(feed, 'entries') and feed.entries:
+            return feed
+    except Exception as e:
+        logger.debug(f"Ошибка парсинга {rss_url}: {e}")
+    logger.error(f"❌ Не удалось загрузить RSS: {rss_url}")
     return None
 
-def extract_link(entry):
-    candidates = []
-    if hasattr(entry, 'link') and entry.link:
-        candidates.append(entry.link)
-    if hasattr(entry, 'id') and entry.id:
-        candidates.append(entry.id)
-    if hasattr(entry, 'guid') and entry.guid:
-        candidates.append(entry.guid)
-    if entry.get('link') and isinstance(entry['link'], list):
-        candidates.extend(entry['link'])
-
-    for cand in candidates:
-        cand = str(cand).strip()
-        if cand.startswith(('http://', 'https://')):
-            return cand
+def get_first_link(entry):
+    """Извлекает первую валидную ссылку из entry.link (может быть строкой или списком)"""
+    link = getattr(entry, 'link', None)
+    if not link:
+        return None
+    if isinstance(link, list):
+        for item in link:
+            if item and str(item).startswith(('http://', 'https://')):
+                return str(item).strip()
+    elif str(link).startswith(('http://', 'https://')):
+        return str(link).strip()
     return None
 
 def format_message(entry, rss_url):
-    link = extract_link(entry)
+    link = get_first_link(entry)
     if not link:
-        logger.warning(f"Не удалось извлечь ссылку из RSS-элемента ({rss_url})")
+        logger.warning(f"Пропущена новость без ссылки из {rss_url}")
         return None
-    # Используем неразрывный пробел (U+00A0) — Telegram принимает как непустой текст
-    return f'<a href="{link}">\u00A0</a>'
+    # Простая ссылка + перевод строки — Telegram сгенерирует превью, текст почти не виден
+    return f"{link}\n"
 
 def send_to_telegram(message):
     if not message:
@@ -128,7 +78,7 @@ def send_to_telegram(message):
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
-        'parse_mode': 'HTML',
+        # НЕТ parse_mode — чистый plain text
         'disable_web_page_preview': False,
         'disable_notification': False
     }
@@ -146,11 +96,12 @@ def rss_check_loop():
     global last_links
     logger.info("🚀 Запуск RSS-бота")
 
+    # Инициализация
     for url in RSS_FEED_URLS:
         try:
             feed = robust_parse_feed(url)
             if feed and feed.entries:
-                link0 = extract_link(feed.entries[0])
+                link0 = get_first_link(feed.entries[0])
                 if link0:
                     last_links[url] = link0
                     logger.info(f"✅ Инициализирована: {urlparse(url).netloc}")
@@ -172,7 +123,7 @@ def rss_check_loop():
                     continue
 
                 latest = feed.entries[0]
-                current_link = extract_link(latest)
+                current_link = get_first_link(latest)
                 if not current_link:
                     logger.warning(f"Пропущена новость без ссылки из {url}")
                     continue
