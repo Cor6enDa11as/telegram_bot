@@ -37,8 +37,11 @@ if not all([BOT_TOKEN, CHANNEL_ID, RSS_FEED_URLS]):
     logger.error("❌ Отсутствуют необходимые переменные окружения!")
     exit(1)
 
-# Храним только последнюю проверенную ссылку для каждой ленты
+# Храним последние проверенные ссылки
 last_checked_links = {}
+# Храним историю отправленных статей для каждой ленты
+sent_articles_history = {}
+MAX_HISTORY = 50  # Храним историю последних 50 статей
 
 def build_headers(rss_url):
     """Создает заголовки для запроса"""
@@ -52,44 +55,45 @@ def build_headers(rss_url):
     }
 
 def robust_parse_feed(rss_url):
-    """Парсинг RSS: сначала requests, если ошибка — пробуем Selenium (если доступен)"""
-    headers = build_headers(rss_url)
+    """Парсинг RSS с учетом особенностей сайтов"""
+    domain = urlparse(rss_url).netloc
 
-    # 1. Пробуем обычный requests
-    try:
-        logger.info(f"📡 Пробуем получить RSS напрямую: {rss_url}")
-        response = requests.get(rss_url, timeout=25, headers=headers)
-        response.raise_for_status()
-        feed = feedparser.parse(response.content)
-        if feed and hasattr(feed, 'entries') and feed.entries:
-            logger.info(f"✅ Успешно через requests: {rss_url}")
-            return feed
-    except Exception as e:
-        logger.warning(f"❌ Ошибка через requests: {e}")
-
-    # 2. Если не сработало и доступен Selenium — пробуем его
-    if HAS_SELENIUM:
+    # Для 4pda.to сначала пробуем Selenium
+    if '4pda.to' in domain and HAS_SELENIUM:
         try:
-            logger.info(f"🤖 Пробуем получить RSS через Selenium: {rss_url}")
+            logger.info(f"🤖 Для 4pda.to используем Selenium")
             page_source = fetch_with_selenium(rss_url)
             if page_source:
                 feed = feedparser.parse(page_source)
                 if feed and hasattr(feed, 'entries') and feed.entries:
-                    logger.info(f"✅ Успешно через Selenium: {rss_url}")
+                    logger.info(f"✅ Успешно через Selenium: {domain}")
                     return feed
         except Exception as e:
-            logger.error(f"❌ Ошибка через Selenium: {e}")
+            logger.error(f"❌ Ошибка Selenium для {domain}: {e}")
 
-    logger.error(f"❌ Все методы парсинга провалились для: {rss_url}")
+    # Для остальных или если Selenium не сработал
+    headers = build_headers(rss_url)
+    try:
+        response = requests.get(rss_url, timeout=25, headers=headers)
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
+        if feed and hasattr(feed, 'entries') and feed.entries:
+            logger.info(f"✅ Успешно через requests: {domain}")
+            return feed
+    except Exception as e:
+        logger.warning(f"❌ Ошибка requests для {domain}: {e}")
+        return None
+
     return None
 
 def fetch_with_selenium(url):
-    """Использование headless браузера для обхода Cloudflare и антибот систем"""
+    """Использование headless браузера для обхода защиты"""
     options = ChromeOptions()
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
 
@@ -97,20 +101,16 @@ def fetch_with_selenium(url):
 
     try:
         driver.get(url)
-
-        # Ждем, пока страница полностью загрузится (включая выполнение JS)
         WebDriverWait(driver, 30).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
-
-        # Возвращаем уже обработанный HTML/XML-код страницы (после выполнения JS)
+        time.sleep(3)  # Дополнительная задержка для загрузки
         return driver.page_source
-
     finally:
         driver.quit()
 
 def get_first_link(entry):
-    """Извлекает первую валидную ссылку из entry.link (может быть строкой или списком)"""
+    """Извлекает первую валидную ссылку"""
     link = getattr(entry, 'link', None)
     if not link:
         return None
@@ -123,19 +123,25 @@ def get_first_link(entry):
         return str(link).strip()
     return None
 
-def format_message(entry, rss_url):
-    """Форматирует сообщение: заголовок статьи как ссылка + скрытый URL для превью"""
+def get_entry_id(entry):
+    """Создает уникальный идентификатор для статьи"""
+    link = get_first_link(entry)
+    if link:
+        return link  # Используем ссылку как идентификатор
+
+    # Если нет ссылки, используем комбинацию заголовка и даты
+    title = getattr(entry, 'title', '')
+    published = getattr(entry, 'published', '')
+    guid = getattr(entry, 'guid', '')
+    return f"{title}_{published}_{guid}"
+
+def format_message(entry):
+    """Форматирует сообщение для Telegram"""
     link = get_first_link(entry)
     if not link:
-        logger.warning(f"Пропущена новость без ссылки из {rss_url}")
         return None
 
-    # Попробуем получить заголовок статьи
-    title = getattr(entry, 'title', 'Новая статья').strip()
-    if not title:
-        title = 'Новая статья'
-
-    # Форматируем как Markdown: [Заголовок](URL)
+    title = getattr(entry, 'title', 'Новая статья').strip() or 'Новая статья'
     return f'[{title}]({link})'
 
 def send_to_telegram(message):
@@ -144,22 +150,23 @@ def send_to_telegram(message):
         return False
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
-        'parse_mode': 'Markdown',  # 🔥 Обязательно для Markdown-ссылки
-        'disable_web_page_preview': False,  # 🔥 Обязательно False, чтобы превью генерировалось
+        'parse_mode': 'Markdown',
+        'disable_web_page_preview': False,
         'disable_notification': False
     }
 
     try:
         response = requests.post(url, json=payload, timeout=10)
-        if response.status_code != 200:
-            logger.error(f"Telegram API error: {response.text}")
-        return response.status_code == 200
+        if response.status_code == 200:
+            return True
+        else:
+            logger.error(f"❌ Telegram API error: {response.text}")
+            return False
     except Exception as e:
-        logger.exception("Ошибка отправки в Telegram")
+        logger.error(f"❌ Ошибка отправки в Telegram: {e}")
         return False
 
 def rss_check_loop():
@@ -169,37 +176,42 @@ def rss_check_loop():
     # Инициализация
     for url in RSS_FEED_URLS:
         domain = urlparse(url).netloc
-        logger.info(f"🔄 Инициализация {domain}...")
-
-        # Просто запоминаем, что ничего еще не проверяли
         last_checked_links[url] = None
-        time.sleep(2)
+        sent_articles_history[url] = set()  # Множество для быстрой проверки
+        logger.info(f"🔄 Инициализирована лента: {domain}")
 
     logger.info(f"✅ Отслеживается {len(RSS_FEED_URLS)} лент")
 
-    # ПЕРВЫЙ ЦИКЛ: НИЧЕГО НЕ ОТПРАВЛЯЕМ
-    logger.info("🔄 Первый цикл проверки (ничего не отправляем)...")
+    # ПЕРВЫЙ ЦИКЛ: запоминаем текущие статьи БЕЗ отправки
+    logger.info("🔄 Первый цикл проверки (запоминаем статьи без отправки)...")
     for url in RSS_FEED_URLS:
         domain = urlparse(url).netloc
         try:
             feed = robust_parse_feed(url)
             if feed and feed.entries:
-                # Берем самую последнюю (первую в списке) ссылку
+                # Запоминаем все текущие статьи
+                for entry in feed.entries:
+                    entry_id = get_entry_id(entry)
+                    if entry_id:
+                        sent_articles_history[url].add(entry_id)
+
+                # Запоминаем последнюю статью как проверенную
                 for entry in feed.entries:
                     link = get_first_link(entry)
                     if link:
                         last_checked_links[url] = link
-                        logger.info(f"✅ Установлена стартовая ссылка для {domain}: {link[:60]}...")
                         break
+
+                logger.info(f"✅ Запомнено {len(sent_articles_history[url])} статей из {domain}")
             else:
                 logger.warning(f"⚠️ Пустая лента при инициализации: {domain}")
         except Exception as e:
             logger.error(f"❌ Ошибка при инициализации {domain}: {e}")
 
-        time.sleep(random.randint(2, 5))
+        time.sleep(random.randint(3, 7))
 
-    logger.info("⏳ Ожидание 1 минуту перед началом отправки...")
-    time.sleep(60)
+    logger.info("⏳ Ожидание 2 минуты перед началом отправки...")
+    time.sleep(120)
 
     # ОСНОВНОЙ ЦИКЛ
     while True:
@@ -208,56 +220,62 @@ def rss_check_loop():
         for url in RSS_FEED_URLS:
             domain = urlparse(url).netloc
             try:
+                logger.info(f"📰 Проверяю ленту: {domain}")
                 feed = robust_parse_feed(url)
+
                 if not feed or not feed.entries:
                     logger.warning(f"⚠️ Пустая лента или ошибка парсинга: {domain}")
                     continue
 
-                last_link = last_checked_links.get(url)
-                new_links_to_send = []
+                sent_in_this_check = 0
 
-                # Идем по статьям от НОВЫХ к СТАРЫМ
+                # Проверяем статьи от НОВЫХ к СТАРЫМ
                 for entry in feed.entries:
-                    link = get_first_link(entry)
-                    if not link:
+                    entry_id = get_entry_id(entry)
+                    if not entry_id:
                         continue
 
-                    # Если это наша последняя проверенная ссылка - останавливаемся
-                    if link == last_link:
-                        break
+                    # Если статья уже была отправлена - пропускаем
+                    if entry_id in sent_articles_history[url]:
+                        continue
 
-                    # Иначе это новая статья - добавляем в список для отправки
-                    new_links_to_send.append((entry, link))
-
-                # Отправляем новые статьи в правильном порядке (от старых к новым)
-                # потому что мы шли от новых к старым, нужно развернуть
-                sent_count = 0
-                for entry, link in reversed(new_links_to_send):
-                    message = format_message(entry, url)
+                    # Новая статья - отправляем
+                    message = format_message(entry)
                     if message and send_to_telegram(message):
                         logger.info(f"✅ Отправлено из {domain}: {getattr(entry, 'title', 'Без заголовка')[:60]}...")
-                        sent_count += 1
+                        sent_in_this_check += 1
+
+                        # Добавляем в историю отправленных
+                        sent_articles_history[url].add(entry_id)
 
                         # Обновляем последнюю проверенную ссылку
-                        last_checked_links[url] = link
+                        link = get_first_link(entry)
+                        if link:
+                            last_checked_links[url] = link
 
                         # Задержка между отправками
                         delay = random.randint(10, 15)
-                        logger.info(f"⏳ Задержка {delay} сек перед следующей отправкой...")
+                        logger.info(f"⏳ Задержка {delay} сек...")
                         time.sleep(delay)
                     else:
-                        logger.error(f"❌ Не удалось отправить новость из {domain}")
+                        logger.error(f"❌ Не удалось отправить из {domain}")
 
-                if sent_count > 0:
-                    logger.info(f"📨 Отправлено {sent_count} новых статей из {domain}")
+                # Ограничиваем размер истории
+                if len(sent_articles_history[url]) > MAX_HISTORY:
+                    # Преобразуем в список, обрезаем и обратно в множество
+                    history_list = list(sent_articles_history[url])
+                    sent_articles_history[url] = set(history_list[-MAX_HISTORY:])
+
+                if sent_in_this_check > 0:
+                    logger.info(f"📨 Отправлено {sent_in_this_check} новых статей из {domain}")
                 else:
                     logger.info(f"📭 Нет новых статей в {domain}")
 
-                time.sleep(random.randint(3, 7))
+                time.sleep(random.randint(5, 10))
 
             except Exception as e:
                 logger.error(f"❌ Ошибка при обработке {domain}: {e}")
-                time.sleep(5)
+                time.sleep(10)
 
         logger.info("✅ Цикл проверки завершен")
         logger.info("⏳ Ожидание 15 минут до следующей проверки...")
@@ -269,6 +287,10 @@ def home():
 
 if __name__ == '__main__':
     logger.info(f"📡 Отслеживается {len(RSS_FEED_URLS)} RSS-лент")
+
+    # Проверяем доступность Selenium
+    if not HAS_SELENIUM:
+        logger.warning("⚠️ Selenium не доступен, 4pda.to может не работать")
 
     Thread(target=rss_check_loop, daemon=True).start()
 
