@@ -118,22 +118,30 @@ def get_first_link(entry):
         for item in link:
             if item and str(item).startswith(('http://', 'https://')):
                 return str(item).strip()
-        return None  # ❗ Возвращаем None, если не нашли подходящий URL
+        return None
     elif str(link).startswith(('http://', 'https://')):
         return str(link).strip()
     return None
 
 def format_message(entry, rss_url):
-    """Форматирует сообщение: только скрытая ссылка для превью (без хэштега)"""
+    """Форматирует сообщение: заголовок статьи как ссылка + скрытый URL для превью"""
     link = get_first_link(entry)
     if not link:
         logger.warning(f"Пропущена новость без ссылки из {rss_url}")
         return None
-    # Используем точку внутри спойлера — превью есть, текст скрыт
-    return f'<a href="{link}"><tg-spoiler>·</tg-spoiler></a>'
+
+    # Попробуем получить заголовок статьи
+    title = getattr(entry, 'title', 'Новая статья').strip()
+    if not title:
+        title = 'Новая статья'
+
+    # Форматируем как Markdown: [Заголовок](URL)
+    # Telegram покажет "Заголовок" как кликабельную ссылку
+    # и сгенерирует превью
+    return f'[{title}]({link})'
 
 def send_to_telegram(message):
-    """Отправляет сообщение в Telegram с HTML-парсингом"""
+    """Отправляет сообщение в Telegram"""
     if not message:
         return False
 
@@ -142,8 +150,8 @@ def send_to_telegram(message):
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
-        'parse_mode': 'HTML',  # 🔥 Обязательно для <tg-spoiler>
-        'disable_web_page_preview': False,
+        'parse_mode': 'Markdown',  # 🔥 Обязательно для Markdown-ссылки
+        'disable_web_page_preview': False,  # 🔥 Обязательно False, чтобы превью генерировалось
         'disable_notification': False
     }
 
@@ -190,9 +198,9 @@ def rss_check_loop():
                 if not feed or not feed.entries:
                     continue
 
-                # Получаем список текущих ссылок (новые + старые)
+                # Получаем список текущих ссылок (только первые MAX_TRACKED)
                 current_links = []
-                for entry in feed.entries:
+                for entry in feed.entries[:MAX_TRACKED]:
                     link = get_first_link(entry)
                     if link:
                         current_links.append(link)
@@ -201,13 +209,14 @@ def rss_check_loop():
                 seen_links = last_links.get(url, [])
 
                 # Находим новые статьи (которых не было в предыдущем списке)
+                # Важно: порядок в current_links - от новых к старым
                 new_links = []
                 for link in current_links:
                     if link not in seen_links:
                         new_links.append(link)
 
                 # Отправляем новые статьи в порядке от новой к старой
-                for link in reversed(new_links):  # от новых к старым
+                for link in new_links:  # уже от новых к старым, как в current_links
                     logger.info(f"🎉 Новая новость: {urlparse(url).netloc} | {link}")
 
                     # Находим entry для форматирования
@@ -218,8 +227,10 @@ def rss_check_loop():
                     message = format_message(entry, url)
                     if message and send_to_telegram(message):
                         # Обновляем список "уже виденных" ссылок
-                        seen_links.insert(0, link)  # добавляем в начало
-                        seen_links = seen_links[:MAX_TRACKED]  # оставляем только последние N
+                        # Вставляем новую ссылку в начало
+                        seen_links.insert(0, link)
+                        # Убираем дубликаты (если вдруг), оставляем только первые MAX_TRACKED
+                        seen_links = list(dict.fromkeys(seen_links))[:MAX_TRACKED]
                         last_links[url] = seen_links
                         # ✅ Задержка 10-15 сек между отправками
                         delay = random.randint(10, 15)
