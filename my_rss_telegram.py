@@ -15,16 +15,14 @@ try:
     HAS_CLOUDSCRAPER = True
 except ImportError:
     HAS_CLOUDSCRAPER = False
-    logging.warning("cloudscraper не установлен — 4pda и подобные сайты могут не работать")
+    logging.warning("cloudscraper не установлен — 4pda может не работать")
 
-# Логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 app = Flask(__name__)
 
-# Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 RSS_FEED_URLS = [url.strip() for url in os.getenv('RSS_FEED_URLS', '').split(',') if url.strip()]
@@ -52,7 +50,9 @@ def parse_with_requests(rss_url):
     return feedparser.parse(resp.content)
 
 def parse_with_cloudscraper(rss_url):
-    scraper = cloudscraper.create_scraper()
+    scraper = cloudscraper.create_scraper(
+        browser={'browser': 'chrome', 'platform': 'linux', 'mobile': False}
+    )
     headers = build_headers(rss_url)
     resp = scraper.get(rss_url, timeout=25, headers=headers)
     resp.raise_for_status()
@@ -83,6 +83,10 @@ def robust_parse_feed(rss_url):
         try:
             feed = method(rss_url)
             if feed and hasattr(feed, 'entries') and feed.entries:
+                # Дополнительная проверка: не HTML-ли это (например, Cloudflare)
+                first = feed.entries[0]
+                if '<html' in str(feed).lower() or 'cloudflare' in str(feed).lower():
+                    raise ValueError("Получен HTML вместо RSS")
                 return feed
         except Exception as e:
             logger.debug(f"Метод {method.__name__} не сработал для {rss_url}: {e}")
@@ -90,24 +94,36 @@ def robust_parse_feed(rss_url):
     logger.error(f"❌ Все методы парсинга провалились для: {rss_url}")
     return None
 
+def extract_link(entry):
+    candidates = []
+    if hasattr(entry, 'link') and entry.link:
+        candidates.append(entry.link)
+    if hasattr(entry, 'id') and entry.id:
+        candidates.append(entry.id)
+    if hasattr(entry, 'guid') and entry.guid:
+        candidates.append(entry.guid)
+    if entry.get('link') and isinstance(entry['link'], list):
+        candidates.extend(entry['link'])
+
+    for cand in candidates:
+        cand = str(cand).strip()
+        if cand.startswith(('http://', 'https://')):
+            return cand
+    return None
+
 def format_message(entry, rss_url):
-    """Возвращает гарантированно непустое HTML-сообщение со скрытой ссылкой"""
-    link = getattr(entry, 'link', '').strip()
+    link = extract_link(entry)
     if not link:
-        link = getattr(entry, 'id', '').strip()
-
-    if not link or not link.startswith(('http://', 'https://')):
-        logger.warning(f"Некорректная ссылка в RSS из {rss_url}: {link}")
+        logger.warning(f"Не удалось извлечь ссылку из RSS-элемента ({rss_url})")
         return None
-
-    # Zero Width Joiner (U+200D) — надёжный невидимый символ для Telegram
-    return f'<a href="{link}">\u200d</a>'
+    # Используем неразрывный пробел (U+00A0) — Telegram принимает как непустой текст
+    return f'<a href="{link}">\u00A0</a>'
 
 def send_to_telegram(message):
     if not message:
         return False
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"  # исправлено
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     payload = {
         'chat_id': CHANNEL_ID,
@@ -123,22 +139,25 @@ def send_to_telegram(message):
             logger.error(f"Telegram API error: {resp.text}")
         return resp.status_code == 200
     except Exception as e:
-        logger.exception("Ошибка при отправке в Telegram")
+        logger.exception("Ошибка отправки в Telegram")
         return False
 
 def rss_check_loop():
     global last_links
     logger.info("🚀 Запуск RSS-бота")
 
-    # Инициализация
     for url in RSS_FEED_URLS:
         try:
             feed = robust_parse_feed(url)
             if feed and feed.entries:
-                last_links[url] = feed.entries[0].link or feed.entries[0].id
-                logger.info(f"✅ Инициализирована: {urlparse(url).netloc}")
+                link0 = extract_link(feed.entries[0])
+                if link0:
+                    last_links[url] = link0
+                    logger.info(f"✅ Инициализирована: {urlparse(url).netloc}")
+                else:
+                    logger.warning(f"⚠️ Нет ссылки в первом элементе: {url}")
             else:
-                logger.warning(f"⚠️ Пустая или недоступная лента: {url}")
+                logger.warning(f"⚠️ Пустая лента: {url}")
         except Exception as e:
             logger.exception(f"Ошибка инициализации {url}")
 
@@ -153,14 +172,14 @@ def rss_check_loop():
                     continue
 
                 latest = feed.entries[0]
-                current_link = latest.link or latest.id
+                current_link = extract_link(latest)
                 if not current_link:
+                    logger.warning(f"Пропущена новость без ссылки из {url}")
                     continue
 
                 prev_link = last_links.get(url)
                 if prev_link != current_link:
                     logger.info(f"🎉 Новая новость: {urlparse(url).netloc}")
-
                     msg = format_message(latest, url)
                     if msg and send_to_telegram(msg):
                         last_links[url] = current_link
