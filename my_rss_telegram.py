@@ -118,8 +118,9 @@ def get_first_link(entry):
         for item in link:
             if item and str(item).startswith(('http://', 'https://')):
                 return str(item).strip()
+        return None  # ❗ Возвращаем None, если не нашли подходящий URL
     elif str(link).startswith(('http://', 'https://')):
-        return str(item).strip()
+        return str(link).strip()
     return None
 
 def format_message(entry, rss_url):
