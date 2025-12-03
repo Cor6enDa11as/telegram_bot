@@ -8,13 +8,27 @@ import time
 import logging
 from dotenv import load_dotenv
 from urllib.parse import urlparse
+import random
 
+# Попытка импорта Selenium
+try:
+    from selenium.webdriver import Chrome, ChromeOptions
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import undetected_chromedriver as uc
+    HAS_SELENIUM = True
+except ImportError:
+    HAS_SELENIUM = False
+    logging.warning("Selenium или undetected_chromedriver не установлены — обход Cloudflare недоступен")
+
+# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 app = Flask(__name__)
 
+# Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 RSS_FEED_URLS = [url.strip() for url in os.getenv('RSS_FEED_URLS', '').split(',') if url.strip()]
@@ -23,7 +37,9 @@ if not all([BOT_TOKEN, CHANNEL_ID, RSS_FEED_URLS]):
     logger.error("❌ Отсутствуют необходимые переменные окружения!")
     exit(1)
 
+# Словарь для отслеживания последних N ссылок (например, 10)
 last_links = {}
+MAX_TRACKED = 10
 
 def build_headers(rss_url):
     domain = urlparse(rss_url).netloc
@@ -36,17 +52,62 @@ def build_headers(rss_url):
     }
 
 def robust_parse_feed(rss_url):
+    """Парсинг RSS: сначала requests, если ошибка — пробуем Selenium (если доступен)"""
     headers = build_headers(rss_url)
+
+    # 1. Пробуем обычный requests
     try:
+        logger.info(f"📡 Пробуем получить RSS напрямую: {rss_url}")
         response = requests.get(rss_url, timeout=25, headers=headers)
         response.raise_for_status()
         feed = feedparser.parse(response.content)
         if feed and hasattr(feed, 'entries') and feed.entries:
+            logger.info(f"✅ Успешно через requests: {rss_url}")
             return feed
     except Exception as e:
-        logger.debug(f"Ошибка парсинга {rss_url}: {e}")
-    logger.error(f"❌ Не удалось загрузить RSS: {rss_url}")
+        logger.warning(f"❌ Ошибка через requests: {e}")
+
+    # 2. Если не сработало и доступен Selenium — пробуем его
+    if HAS_SELENIUM:
+        try:
+            logger.info(f"🤖 Пробуем получить RSS через Selenium: {rss_url}")
+            page_source = fetch_with_selenium(rss_url)
+            if page_source:
+                feed = feedparser.parse(page_source)
+                if feed and hasattr(feed, 'entries') and feed.entries:
+                    logger.info(f"✅ Успешно через Selenium: {rss_url}")
+                    return feed
+        except Exception as e:
+            logger.error(f"❌ Ошибка через Selenium: {e}")
+
+    logger.error(f"❌ Все методы парсинга провалились для: {rss_url}")
     return None
+
+def fetch_with_selenium(url):
+    """Использование headless браузера для обхода Cloudflare и антибот систем"""
+    options = ChromeOptions()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+
+    driver = uc.Chrome(options=options)
+
+    try:
+        driver.get(url)
+
+        # Ждем, пока страница полностью загрузится (включая выполнение JS)
+        WebDriverWait(driver, 30).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+
+        # Возвращаем уже обработанный HTML/XML-код страницы (после выполнения JS)
+        return driver.page_source
+
+    finally:
+        driver.quit()
 
 def get_first_link(entry):
     """Извлекает первую валидную ссылку из entry.link (может быть строкой или списком)"""
@@ -58,18 +119,20 @@ def get_first_link(entry):
             if item and str(item).startswith(('http://', 'https://')):
                 return str(item).strip()
     elif str(link).startswith(('http://', 'https://')):
-        return str(link).strip()
+        return str(item).strip()
     return None
 
 def format_message(entry, rss_url):
+    """Форматирует сообщение: только скрытая ссылка для превью (без хэштега)"""
     link = get_first_link(entry)
     if not link:
         logger.warning(f"Пропущена новость без ссылки из {rss_url}")
         return None
-    # Простая ссылка + перевод строки — Telegram сгенерирует превью, текст почти не виден
-    return f"{link}\n"
+    # Используем точку внутри спойлера — превью есть, текст скрыт
+    return f'<a href="{link}"><tg-spoiler>·</tg-spoiler></a>'
 
 def send_to_telegram(message):
+    """Отправляет сообщение в Telegram с HTML-парсингом"""
     if not message:
         return False
 
@@ -78,35 +141,39 @@ def send_to_telegram(message):
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
-        # НЕТ parse_mode — чистый plain text
+        'parse_mode': 'HTML',  # 🔥 Обязательно для <tg-spoiler>
         'disable_web_page_preview': False,
         'disable_notification': False
     }
 
     try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code != 200:
-            logger.error(f"Telegram API error: {resp.text}")
-        return resp.status_code == 200
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"Telegram API error: {response.text}")
+        return response.status_code == 200
     except Exception as e:
         logger.exception("Ошибка отправки в Telegram")
         return False
 
 def rss_check_loop():
+    """Главный цикл мониторинга"""
     global last_links
-    logger.info("🚀 Запуск RSS-бота")
+
+    logger.info("🚀 Запуск RSS бота")
 
     # Инициализация
     for url in RSS_FEED_URLS:
         try:
             feed = robust_parse_feed(url)
             if feed and feed.entries:
-                link0 = get_first_link(feed.entries[0])
-                if link0:
-                    last_links[url] = link0
-                    logger.info(f"✅ Инициализирована: {urlparse(url).netloc}")
-                else:
-                    logger.warning(f"⚠️ Нет ссылки в первом элементе: {url}")
+                # Сохраняем первые N ссылок (или все, если их меньше)
+                links = []
+                for entry in feed.entries[:MAX_TRACKED]:
+                    link = get_first_link(entry)
+                    if link:
+                        links.append(link)
+                last_links[url] = links
+                logger.info(f"✅ Инициализирована: {urlparse(url).netloc} | Сохранено {len(links)} статей")
             else:
                 logger.warning(f"⚠️ Пустая лента: {url}")
         except Exception as e:
@@ -122,21 +189,44 @@ def rss_check_loop():
                 if not feed or not feed.entries:
                     continue
 
-                latest = feed.entries[0]
-                current_link = get_first_link(latest)
-                if not current_link:
-                    logger.warning(f"Пропущена новость без ссылки из {url}")
-                    continue
+                # Получаем список текущих ссылок (новые + старые)
+                current_links = []
+                for entry in feed.entries:
+                    link = get_first_link(entry)
+                    if link:
+                        current_links.append(link)
 
-                prev_link = last_links.get(url)
-                if prev_link != current_link:
-                    logger.info(f"🎉 Новая новость: {urlparse(url).netloc}")
-                    msg = format_message(latest, url)
-                    if msg and send_to_telegram(msg):
-                        last_links[url] = current_link
-                        time.sleep(5)
+                # Получаем список "уже виденных" ссылок
+                seen_links = last_links.get(url, [])
+
+                # Находим новые статьи (которых не было в предыдущем списке)
+                new_links = []
+                for link in current_links:
+                    if link not in seen_links:
+                        new_links.append(link)
+
+                # Отправляем новые статьи в порядке от новой к старой
+                for link in reversed(new_links):  # от новых к старым
+                    logger.info(f"🎉 Новая новость: {urlparse(url).netloc} | {link}")
+
+                    # Находим entry для форматирования
+                    entry = next((e for e in feed.entries if get_first_link(e) == link), None)
+                    if not entry:
+                        continue
+
+                    message = format_message(entry, url)
+                    if message and send_to_telegram(message):
+                        # Обновляем список "уже виденных" ссылок
+                        seen_links.insert(0, link)  # добавляем в начало
+                        seen_links = seen_links[:MAX_TRACKED]  # оставляем только последние N
+                        last_links[url] = seen_links
+                        # ✅ Задержка 10-15 сек между отправками
+                        delay = random.randint(10, 15)
+                        logger.info(f"⏳ Задержка {delay} сек перед следующей отправкой...")
+                        time.sleep(delay)
                     else:
                         logger.error(f"❌ Не удалось отправить новость из {url}")
+
             except Exception as e:
                 logger.exception(f"Ошибка при обработке {url}")
 
