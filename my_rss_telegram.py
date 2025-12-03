@@ -14,7 +14,6 @@ import random
 try:
     from selenium.webdriver import Chrome, ChromeOptions
     from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
     import undetected_chromedriver as uc
     HAS_SELENIUM = True
 except ImportError:
@@ -37,9 +36,8 @@ if not all([BOT_TOKEN, CHANNEL_ID, RSS_FEED_URLS]):
     logger.error("❌ Отсутствуют необходимые переменные окружения!")
     exit(1)
 
-# Словарь для отслеживания последних N ссылок (например, 10)
+# Словарь для отслеживания последних 20 ссылок
 last_links = {}
-MAX_TRACKED = 10
 
 def build_headers(rss_url):
     domain = urlparse(rss_url).netloc
@@ -98,19 +96,18 @@ def fetch_with_selenium(url):
     try:
         driver.get(url)
 
-        # Ждем, пока страница полностью загрузится (включая выполнение JS)
+        # Ждем, пока страница полностью загрузится
         WebDriverWait(driver, 30).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
 
-        # Возвращаем уже обработанный HTML/XML-код страницы (после выполнения JS)
         return driver.page_source
 
     finally:
         driver.quit()
 
 def get_first_link(entry):
-    """Извлекает первую валидную ссылку из entry.link (может быть строкой или списком)"""
+    """Извлекает первую валидную ссылку"""
     link = getattr(entry, 'link', None)
     if not link:
         return None
@@ -124,20 +121,12 @@ def get_first_link(entry):
     return None
 
 def format_message(entry, rss_url):
-    """Форматирует сообщение: заголовок статьи как ссылка + скрытый URL для превью"""
+    """Форматирует сообщение для Telegram"""
     link = get_first_link(entry)
     if not link:
-        logger.warning(f"Пропущена новость без ссылки из {rss_url}")
         return None
 
-    # Попробуем получить заголовок статьи
-    title = getattr(entry, 'title', 'Новая статья').strip()
-    if not title:
-        title = 'Новая статья'
-
-    # Форматируем как Markdown: [Заголовок](URL)
-    # Telegram покажет "Заголовок" как кликабельную ссылку
-    # и сгенерирует превью
+    title = getattr(entry, 'title', 'Новая статья').strip() or 'Новая статья'
     return f'[{title}]({link})'
 
 def send_to_telegram(message):
@@ -146,22 +135,18 @@ def send_to_telegram(message):
         return False
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
     payload = {
         'chat_id': CHANNEL_ID,
         'text': message,
-        'parse_mode': 'Markdown',  # 🔥 Обязательно для Markdown-ссылки
-        'disable_web_page_preview': False,  # 🔥 Обязательно False, чтобы превью генерировалось
-        'disable_notification': False
+        'parse_mode': 'Markdown',
+        'disable_web_page_preview': False,
     }
 
     try:
         response = requests.post(url, json=payload, timeout=10)
-        if response.status_code != 200:
-            logger.error(f"Telegram API error: {response.text}")
         return response.status_code == 200
     except Exception as e:
-        logger.exception("Ошибка отправки в Telegram")
+        logger.error(f"❌ Ошибка отправки в Telegram: {e}")
         return False
 
 def rss_check_loop():
@@ -170,79 +155,102 @@ def rss_check_loop():
 
     logger.info("🚀 Запуск RSS бота")
 
-    # Инициализация
+    # Инициализация - запоминаем текущие статьи при запуске
+    logger.info("🔄 Инициализация лент...")
     for url in RSS_FEED_URLS:
         try:
             feed = robust_parse_feed(url)
             if feed and feed.entries:
-                # Сохраняем первые N ссылок (или все, если их меньше)
+                # Запоминаем только ссылки из последних 20 статей
                 links = []
-                for entry in feed.entries[:MAX_TRACKED]:
+                for entry in feed.entries[:20]:
                     link = get_first_link(entry)
                     if link:
                         links.append(link)
-                last_links[url] = links
-                logger.info(f"✅ Инициализирована: {urlparse(url).netloc} | Сохранено {len(links)} статей")
+
+                # Сохраняем В ОБРАТНОМ ПОРЯДКЕ - от новых к старым
+                last_links[url] = links[::-1] if links else []
+                logger.info(f"✅ Запомнено {len(links)} статей из {urlparse(url).netloc}")
             else:
                 logger.warning(f"⚠️ Пустая лента: {url}")
+                last_links[url] = []
         except Exception as e:
-            logger.exception(f"Ошибка инициализации {url}")
+            logger.error(f"❌ Ошибка инициализации {url}: {e}")
+            last_links[url] = []
 
     logger.info(f"✅ Отслеживается {len(last_links)} лент")
-    time.sleep(900)
+
+    # Ждем 1 минуту перед началом мониторинга
+    logger.info("⏳ Ожидание 1 минуту перед началом мониторинга...")
+    time.sleep(60)
 
     while True:
+        logger.info("🔍 Начинаю цикл проверки...")
+
         for url in RSS_FEED_URLS:
             try:
+                logger.info(f"📰 Проверяю: {urlparse(url).netloc}")
                 feed = robust_parse_feed(url)
+
                 if not feed or not feed.entries:
                     continue
 
-                # Получаем список текущих ссылок (только первые MAX_TRACKED)
+                # Получаем текущие ссылки (новые идут первыми в RSS)
                 current_links = []
-                for entry in feed.entries[:MAX_TRACKED]:
+                for entry in feed.entries:
                     link = get_first_link(entry)
                     if link:
                         current_links.append(link)
 
-                # Получаем список "уже виденных" ссылок
-                seen_links = last_links.get(url, [])
+                # Получаем сохраненные ссылки
+                saved_links = last_links.get(url, [])
 
-                # Находим новые статьи (которых не было в предыдущем списке)
-                # Важно: порядок в current_links - от новых к старым
-                new_links = []
+                # ПРОСТАЯ ЛОГИКА: находим новые статьи
+                # Идем по текущим статьям от новых к старым
+                new_links_sent = 0
                 for link in current_links:
-                    if link not in seen_links:
-                        new_links.append(link)
+                    # Если ссылка уже есть в сохраненных - пропускаем
+                    if link in saved_links:
+                        continue
 
-                # Отправляем новые статьи в порядке от новой к старой
-                for link in new_links:  # уже от новых к старым, как в current_links
-                    logger.info(f"🎉 Новая новость: {urlparse(url).netloc} | {link}")
+                    # Находим entry для этой ссылки
+                    entry = None
+                    for e in feed.entries:
+                        if get_first_link(e) == link:
+                            entry = e
+                            break
 
-                    # Находим entry для форматирования
-                    entry = next((e for e in feed.entries if get_first_link(e) == link), None)
                     if not entry:
                         continue
 
+                    # Отправляем сообщение
                     message = format_message(entry, url)
                     if message and send_to_telegram(message):
-                        # Обновляем список "уже виденных" ссылок
-                        # Вставляем новую ссылку в начало
-                        seen_links.insert(0, link)
-                        # Убираем дубликаты (если вдруг), оставляем только первые MAX_TRACKED
-                        seen_links = list(dict.fromkeys(seen_links))[:MAX_TRACKED]
-                        last_links[url] = seen_links
-                        # ✅ Задержка 10-15 сек между отправками
-                        delay = random.randint(10, 15)
-                        logger.info(f"⏳ Задержка {delay} сек перед следующей отправкой...")
+                        logger.info(f"✅ Отправлено: {getattr(entry, 'title', 'Без заголовка')[:50]}...")
+                        new_links_sent += 1
+
+                        # Ждем 5-10 секунд между отправками
+                        delay = random.randint(5, 10)
                         time.sleep(delay)
                     else:
                         logger.error(f"❌ Не удалось отправить новость из {url}")
 
-            except Exception as e:
-                logger.exception(f"Ошибка при обработке {url}")
+                # Обновляем сохраненные ссылки: новые + старые (максимум 20)
+                if new_links_sent > 0:
+                    # Добавляем новые ссылки в начало (они новые)
+                    all_links = current_links[:20]  # Берем только последние 20
+                    last_links[url] = all_links
+                    logger.info(f"📨 Отправлено {new_links_sent} новых статей из {urlparse(url).netloc}")
 
-        logger.info("✅ Цикл проверки завершён")
+                # Небольшая задержка между проверкой разных лент
+                time.sleep(3)
+
+            except Exception as e:
+                logger.error(f"❌ Ошибка при обработке {url}: {e}")
+                time.sleep(5)
+
+        logger.info("✅ Цикл проверки завершен")
+        logger.info("⏳ Ожидание 15 минут до следующей проверки...")
         time.sleep(900)
 
 @app.route('/')
