@@ -2,6 +2,7 @@
 import os
 import logging
 import feedparser
+import asyncio
 from telegram.ext import Application, ContextTypes
 
 # Настройки
@@ -47,7 +48,7 @@ async def check_rss(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Ошибка при парсинге RSS: {e}")
 
-def main():
+async def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Добавляем задачу проверки RSS
@@ -56,7 +57,7 @@ def main():
 
     # Запуск webhook (для работы на Render)
     port = int(os.environ.get("PORT", 8000))
-    app.run_webhook(
+    await app.run_webhook(
         listen="0.0.0.0",
         port=port,
         url_path=BOT_TOKEN,
@@ -64,4 +65,4 @@ def main():
     )
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
