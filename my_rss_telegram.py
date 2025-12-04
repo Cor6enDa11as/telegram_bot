@@ -5,7 +5,8 @@ import feedparser
 import requests
 import time
 import logging
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from flask import Flask
 
 # Настройка логирования
@@ -46,6 +47,10 @@ RSS_FEEDS = [
     "https://overclockers.ru/rss/hardnews.rss",
     "https://overclockers.ru/rss/softnews.rss",
 ]
+
+# Глобальные переменные
+last_check_time = None
+is_checking = False
 
 def load_dates():
     """Загружаем даты последних новостей"""
@@ -130,94 +135,149 @@ def send_to_telegram(title, link):
 
 def check_feeds():
     """Проверяем все RSS ленты"""
-    logger.info(f"🔍 Проверка новостей начата")
+    global last_check_time, is_checking
 
-    # Загружаем сохраненные даты
-    dates = load_dates()
+    if is_checking:
+        logger.info("⚠️  Проверка уже выполняется, пропускаем")
+        return 0
 
-    # Если первый запуск - инициализируем
-    if not dates:
-        logger.info("🔄 Первый запуск - инициализация")
+    is_checking = True
+    try:
+        logger.info(f"🔍 Начало проверки новостей")
+
+        # Загружаем сохраненные даты
+        dates = load_dates()
+
+        # Если первый запуск - инициализируем
+        if not dates:
+            logger.info("🔄 Первый запуск - инициализация")
+            for feed_url in RSS_FEEDS:
+                try:
+                    feed = feedparser.parse(feed_url)
+                    if feed.entries and hasattr(feed.entries[0], 'published_parsed'):
+                        dates[feed_url] = datetime(*feed.entries[0].published_parsed[:6])
+                        logger.info(f"  Инициализирована: {feed_url[:50]}...")
+                except:
+                    pass
+            save_dates(dates)
+            logger.info("✅ Инициализация завершена")
+            last_check_time = datetime.now()
+            return 0
+
+        sent_count = 0
+
+        # Проверяем каждую ленту
         for feed_url in RSS_FEEDS:
             try:
                 feed = feedparser.parse(feed_url)
+                if not feed.entries:
+                    continue
+
+                last_date = dates.get(feed_url)
+
+                # Собираем новые новости
+                new_entries = []
+                for entry in feed.entries:
+                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                        pub_date = datetime(*entry.published_parsed[:6])
+
+                        if not last_date or pub_date > last_date:
+                            new_entries.append(entry)
+                        else:
+                            break
+
+                # Отправляем новые новости
+                if new_entries:
+                    logger.info(f"  {feed_url[:40]}...: {len(new_entries)} новых")
+
+                    # Отправляем в обратном порядке (старые → новые)
+                    for entry in reversed(new_entries):
+                        # Определяем язык и переводим если нужно
+                        title = entry.title
+                        if not is_russian_text(title):
+                            translated, success = translate_text(title)
+                            if success:
+                                title = translated
+
+                        # Отправляем в Telegram
+                        if send_to_telegram(title, entry.link):
+                            sent_count += 1
+                            logger.info(f"    ✅ Отправлено: {title[:50]}...")
+
+                            # ЗАДЕРЖКА МЕЖДУ НОВОСТЯМИ
+                            time.sleep(10)
+
+                # Обновляем дату для этой ленты
                 if feed.entries and hasattr(feed.entries[0], 'published_parsed'):
                     dates[feed_url] = datetime(*feed.entries[0].published_parsed[:6])
-                    logger.info(f"  Инициализирована: {feed_url[:50]}...")
-            except:
-                pass
+
+            except Exception as e:
+                logger.error(f"  Ошибка ленты: {str(e)[:50]}")
+
+        # Сохраняем обновленные даты
         save_dates(dates)
-        logger.info("✅ Инициализация завершена")
-        return 0
+        last_check_time = datetime.now()
+        logger.info(f"📊 Проверка завершена. Отправлено: {sent_count} новостей")
+        return sent_count
 
-    sent_count = 0
+    finally:
+        is_checking = False
 
-    # Проверяем каждую ленту
-    for feed_url in RSS_FEEDS:
-        try:
-            feed = feedparser.parse(feed_url)
-            if not feed.entries:
-                continue
+def auto_check_scheduler():
+    """Фоновая задача: проверка каждые 15 минут"""
+    logger.info("⏰ Автоматический планировщик запущен")
 
-            last_date = dates.get(feed_url)
+    # Первая проверка сразу
+    check_feeds()
 
-            # Собираем новые новости
-            new_entries = []
-            for entry in feed.entries:
-                if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    pub_date = datetime(*entry.published_parsed[:6])
-
-                    if not last_date or pub_date > last_date:
-                        new_entries.append(entry)
-                    else:
-                        break
-
-            # Отправляем новые новости
-            if new_entries:
-                logger.info(f"  {feed_url[:40]}...: {len(new_entries)} новых")
-
-                # Отправляем в обратном порядке (старые → новые)
-                for entry in reversed(new_entries):
-                    # Определяем язык и переводим если нужно
-                    title = entry.title
-                    if not is_russian_text(title):
-                        translated, success = translate_text(title)
-                        if success:
-                            title = translated
-
-                    # Отправляем в Telegram
-                    if send_to_telegram(title, entry.link):
-                        sent_count += 1
-                        logger.info(f"    ✅ Отправлено: {title[:50]}...")
-
-                        # ЗАДЕРЖКА МЕЖДУ НОВОСТЯМИ
-                        time.sleep(10)
-
-            # Обновляем дату для этой ленты
-            if feed.entries and hasattr(feed.entries[0], 'published_parsed'):
-                dates[feed_url] = datetime(*feed.entries[0].published_parsed[:6])
-
-        except Exception as e:
-            logger.error(f"  Ошибка ленты: {str(e)[:50]}")
-
-    # Сохраняем обновленные даты
-    save_dates(dates)
-    logger.info(f"📊 Проверка завершена. Отправлено: {sent_count} новостей")
-    return sent_count
+    # Затем каждые 15 минут
+    while True:
+        time.sleep(15 * 60)  # 15 минут
+        logger.info("⏰ Автопроверка по расписанию")
+        check_feeds()
 
 @app.route('/')
 def home():
-    return """
+    global last_check_time
+    next_check = "скоро"
+    if last_check_time:
+        next_check_time = last_check_time + timedelta(minutes=15)
+        next_check = next_check_time.strftime("%H:%M:%S")
+
+    return f"""
     <h1>RSS to Telegram Bot ✅</h1>
-    <p>Бот работает. Задержка между новостями: 10 секунд.</p>
+    <p>Бот работает автоматически.</p>
+    <p>Задержка между новостями: 10 секунд</p>
+    <p>Проверка каждые: 15 минут</p>
+    <p>Следующая проверка: {next_check}</p>
     <p><a href="/check">Проверить сейчас</a></p>
+    <p><a href="/status">Статус</a></p>
     """
 
 @app.route('/check')
 def check():
-    """Эндпоинт для UptimeRobot"""
+    """Ручная проверка"""
     result = check_feeds()
     return f"✅ Проверка завершена. Отправлено: {result} новостей"
+
+@app.route('/status')
+def status():
+    global last_check_time, is_checking
+    status_text = "Проверка выполняется" if is_checking else "Готов"
+
+    next_check = "скоро"
+    if last_check_time:
+        next_check_time = last_check_time + timedelta(minutes=15)
+        next_check = next_check_time.strftime("%H:%M:%S")
+
+    return f"""
+    <h2>Статус бота</h2>
+    <p>Состояние: {status_text}</p>
+    <p>Последняя проверка: {last_check_time.strftime('%H:%M:%S') if last_check_time else 'никогда'}</p>
+    <p>Следующая проверка: {next_check}</p>
+    <p>Лент отслеживается: {len(RSS_FEEDS)}</p>
+    <p><a href="/">На главную</a></p>
+    """
 
 @app.route('/health')
 def health():
@@ -236,11 +296,15 @@ if __name__ == '__main__':
     logger.info("🚀 RSS to Telegram Bot запущен")
     logger.info(f"📰 Отслеживается лент: {len(RSS_FEEDS)}")
     logger.info("⏳ Задержка между новостями: 10 секунд")
+    logger.info("⏰ Автопроверка каждые: 15 минут")
     logger.info("=" * 50)
 
-    # Первая проверка при запуске
-    check_feeds()
+    # Запускаем планировщик в отдельном потоке
+    scheduler_thread = threading.Thread(target=auto_check_scheduler, daemon=True)
+    scheduler_thread.start()
+    logger.info("✅ Планировщик запущен в фоновом режиме")
 
     # Запускаем Flask
     port = int(os.getenv('PORT', 10000))
+    logger.info(f"🌐 Flask сервер запускается на порту {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
