@@ -5,7 +5,7 @@ import feedparser
 import threading
 import time
 from flask import Flask, request
-from telegram.ext import Updater, MessageHandler, Filters
+from telegram.ext import Updater
 
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
