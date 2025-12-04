@@ -19,81 +19,35 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Сначала определяем функцию для парсинга RSS лент
+def parse_rss_feeds_from_env(rss_url_env):
+    """Парсит RSS ленты из переменной окружения"""
+    if not rss_url_env:
+        return []
+
+    # Ищем все URL в строке с помощью regex
+    url_pattern = r'https?://[^\s,]+'
+    feeds = re.findall(url_pattern, rss_url_env)
+
+    # Очищаем URL от лишних пробелов
+    cleaned_feeds = []
+    for feed in feeds:
+        feed = feed.strip()
+        # Убираем возможные пробелы в конце и кодируем пробелы внутри URL
+        if ' ' in feed:
+            feed = feed.replace(' ', '%20')
+        cleaned_feeds.append(feed)
+
+    return cleaned_feeds
+
 # Конфигурация из переменных окружения
 class Config:
     TELEGRAM_BOT_TOKEN = os.getenv('BOT_TOKEN')
     TELEGRAM_CHANNEL_ID = os.getenv('CHANNEL_ID')
     RSS_URL = os.getenv('RSS_URL')
 
-    # Функция для правильного разделения RSS лент
-    @staticmethod
-    def get_rss_feeds():
-        if not Config.RSS_URL:
-            return []
-
-        # Разделяем по запятым, но учитываем, что URL могут содержать запятые
-        # Простой подход - разделить по ',http' или ', https'
-        feeds = []
-        urls = Config.RSS_URL.split(',')
-
-        current_url = ""
-        for url_part in urls:
-            url_part = url_part.strip()
-            if not url_part:
-                continue
-
-            if url_part.startswith('http'):
-                # Если у нас уже есть накопленный URL, сохраняем его
-                if current_url:
-                    feeds.append(current_url)
-                current_url = url_part
-            else:
-                # Это продолжение предыдущего URL
-                if current_url:
-                    current_url += ',' + url_part
-                else:
-                    current_url = url_part
-
-        # Добавляем последний URL
-        if current_url:
-            feeds.append(current_url)
-
-        logger.info(f"Найдено RSS лент: {len(feeds)}")
-        return feeds
-
-    # Альтернативный метод - разделение по новой строке
-    @staticmethod
-    def get_rss_feeds_newline():
-        if not Config.RSS_URL:
-            return []
-
-        # Заменяем запятые на переносы строк, затем разделяем
-        feeds_text = Config.RSS_URL.replace(',', '\n')
-        feeds = []
-
-        for line in feeds_text.split('\n'):
-            url = line.strip()
-            if url and url.startswith('http'):
-                feeds.append(url)
-
-        logger.info(f"Найдено RSS лент (новый метод): {len(feeds)}")
-        return feeds
-
-    # Самый надежный метод - разделение по шаблону URL
-    @staticmethod
-    def get_rss_feeds_regex():
-        if not Config.RSS_URL:
-            return []
-
-        # Ищем все URL в строке
-        url_pattern = r'https?://[^\s,]+'
-        feeds = re.findall(url_pattern, Config.RSS_URL)
-
-        logger.info(f"Найдено RSS лент (regex): {len(feeds)}")
-        return feeds
-
-    # Используем regex метод по умолчанию
-    RSS_FEEDS = get_rss_feeds_regex.__func__()
+    # Парсим RSS ленты
+    RSS_FEEDS = parse_rss_feeds_from_env(RSS_URL)
 
     # Интервал проверки в минутах
     CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '10'))
@@ -216,7 +170,8 @@ def send_to_telegram(title, link, feed_url=None):
         return (text
                 .replace('&', '&amp;')
                 .replace('<', '&lt;')
-                .replace('>', '&gt;'))
+                .replace('>', '&gt;')
+                .replace('"', '&quot;'))
 
     # Форматируем заголовок
     escaped_title = escape_html(title[:Config.MAX_TITLE_LENGTH])
