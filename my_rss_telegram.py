@@ -53,15 +53,24 @@ async def main():
 
     # Добавляем задачу проверки RSS
     job_queue = app.job_queue
-    job_queue.run_repeating(check_rss, interval=CHECK_INTERVAL, first=1)
+    if job_queue:
+        job_queue.run_repeating(check_rss, interval=CHECK_INTERVAL, first=1)
+    else:
+        logging.error("JobQueue не создан! Проверьте зависимости.")
+        return
 
     # Запуск webhook (для работы на Render)
     port = int(os.environ.get("PORT", 8000))
+    webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{BOT_TOKEN}"
+
+    # Устанавливаем webhook
+    await app.bot.set_webhook(url=webhook_url)
+
+    # Запускаем приложение
     await app.run_webhook(
         listen="0.0.0.0",
         port=port,
         url_path=BOT_TOKEN,
-        webhook_url=f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{BOT_TOKEN}"
     )
 
 if __name__ == "__main__":
