@@ -8,6 +8,7 @@ import logging
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify
+import re
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,14 +25,84 @@ class Config:
     TELEGRAM_CHANNEL_ID = os.getenv('CHANNEL_ID')
     RSS_URL = os.getenv('RSS_URL')
 
-    # Несколько RSS лент можно передать через разделитель
-    RSS_FEEDS = RSS_URL.split(';') if RSS_URL else []
+    # Функция для правильного разделения RSS лент
+    @staticmethod
+    def get_rss_feeds():
+        if not Config.RSS_URL:
+            return []
+
+        # Разделяем по запятым, но учитываем, что URL могут содержать запятые
+        # Простой подход - разделить по ',http' или ', https'
+        feeds = []
+        urls = Config.RSS_URL.split(',')
+
+        current_url = ""
+        for url_part in urls:
+            url_part = url_part.strip()
+            if not url_part:
+                continue
+
+            if url_part.startswith('http'):
+                # Если у нас уже есть накопленный URL, сохраняем его
+                if current_url:
+                    feeds.append(current_url)
+                current_url = url_part
+            else:
+                # Это продолжение предыдущего URL
+                if current_url:
+                    current_url += ',' + url_part
+                else:
+                    current_url = url_part
+
+        # Добавляем последний URL
+        if current_url:
+            feeds.append(current_url)
+
+        logger.info(f"Найдено RSS лент: {len(feeds)}")
+        return feeds
+
+    # Альтернативный метод - разделение по новой строке
+    @staticmethod
+    def get_rss_feeds_newline():
+        if not Config.RSS_URL:
+            return []
+
+        # Заменяем запятые на переносы строк, затем разделяем
+        feeds_text = Config.RSS_URL.replace(',', '\n')
+        feeds = []
+
+        for line in feeds_text.split('\n'):
+            url = line.strip()
+            if url and url.startswith('http'):
+                feeds.append(url)
+
+        logger.info(f"Найдено RSS лент (новый метод): {len(feeds)}")
+        return feeds
+
+    # Самый надежный метод - разделение по шаблону URL
+    @staticmethod
+    def get_rss_feeds_regex():
+        if not Config.RSS_URL:
+            return []
+
+        # Ищем все URL в строке
+        url_pattern = r'https?://[^\s,]+'
+        feeds = re.findall(url_pattern, Config.RSS_URL)
+
+        logger.info(f"Найдено RSS лент (regex): {len(feeds)}")
+        return feeds
+
+    # Используем regex метод по умолчанию
+    RSS_FEEDS = get_rss_feeds_regex.__func__()
 
     # Интервал проверки в минутах
     CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '10'))
 
     # Файл базы данных
     DB_FILE = os.getenv('DB_FILE', 'processed_posts.db')
+
+    # Максимальная длина заголовка
+    MAX_TITLE_LENGTH = int(os.getenv('MAX_TITLE_LENGTH', '300'))
 
 # Проверка конфигурации
 def validate_config():
@@ -53,6 +124,14 @@ def validate_config():
         return False
 
     logger.info(f"Конфигурация загружена. RSS лент: {len(Config.RSS_FEEDS)}")
+
+    # Выводим первые 5 лент для проверки
+    for i, feed in enumerate(Config.RSS_FEEDS[:5]):
+        logger.info(f"  Лента {i+1}: {feed[:80]}...")
+
+    if len(Config.RSS_FEEDS) > 5:
+        logger.info(f"  ... и еще {len(Config.RSS_FEEDS) - 5} лент")
+
     return True
 
 # Инициализация базы данных
@@ -111,37 +190,58 @@ def mark_as_processed(post_id, feed_url, title):
         logger.error(f"Ошибка сохранения в БД: {e}")
         return False
 
+# Очистка URL от лишних символов
+def clean_url(url):
+    url = url.strip()
+    # Убираем возможные пробелы в конце
+    url = url.rstrip()
+    # Заменяем пробелы на %20 если они есть внутри URL
+    if ' ' in url:
+        parts = url.split(' ')
+        url = parts[0]
+        for part in parts[1:]:
+            if part.startswith('http'):
+                break
+            url += '%20' + part
+    return url
+
 # Отправка сообщения в Telegram
 def send_to_telegram(title, link, feed_url=None):
     url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
 
     # Экранируем специальные символы HTML
     def escape_html(text):
+        if not text:
+            return ""
         return (text
                 .replace('&', '&amp;')
                 .replace('<', '&lt;')
                 .replace('>', '&gt;'))
 
     # Форматируем заголовок
-    escaped_title = escape_html(title[:300])  # Ограничиваем длину заголовка
+    escaped_title = escape_html(title[:Config.MAX_TITLE_LENGTH])
 
     # Форматируем сообщение с кликабельной ссылкой
     message = f'<a href="{link}">{escaped_title}</a>'
 
     # Добавляем источник, если указан
     if feed_url:
-        source_name = feed_url.split('//')[-1].split('/')[0]
-        message += f"\n\n🔗 Источник: {source_name}"
+        try:
+            source_name = feed_url.split('//')[-1].split('/')[0]
+            message += f"\n\n🔗 Источник: {source_name}"
+        except:
+            pass
 
     data = {
         'chat_id': Config.TELEGRAM_CHANNEL_ID,
         'text': message,
         'parse_mode': 'HTML',
-        'disable_web_page_preview': False
+        'disable_web_page_preview': False,
+        'disable_notification': False
     }
 
     try:
-        response = requests.post(url, data=data, timeout=10)
+        response = requests.post(url, data=data, timeout=30)
         response.raise_for_status()
 
         result = response.json()
@@ -152,6 +252,8 @@ def send_to_telegram(title, link, feed_url=None):
             logger.error(f"❌ Ошибка Telegram API: {result}")
             return False
 
+    except requests.exceptions.Timeout:
+        logger.error(f"❌ Таймаут при отправке в Telegram")
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ Ошибка сети при отправке в Telegram: {e}")
     except Exception as e:
@@ -162,23 +264,26 @@ def send_to_telegram(title, link, feed_url=None):
 # Обработка одной RSS ленты
 def process_single_feed(feed_url):
     try:
-        logger.info(f"📡 Проверяем ленту: {feed_url}")
+        logger.info(f"📡 Проверяем ленту: {feed_url[:80]}...")
+
+        # Очищаем URL
+        clean_feed_url = clean_url(feed_url)
 
         # Парсим RSS с таймаутом
-        feed = feedparser.parse(feed_url)
+        feed = feedparser.parse(clean_feed_url)
 
         if feed.bozo:  # Проверяем на ошибки парсинга
-            logger.warning(f"⚠️  Проблемы с парсингом RSS {feed_url}: {feed.bozo_exception}")
+            logger.warning(f"⚠️  Проблемы с парсингом RSS: {feed.bozo_exception}")
 
         if not feed.entries:
-            logger.warning(f"⚠️  В ленте {feed_url} нет записей")
+            logger.warning(f"⚠️  В ленте нет записей")
             return 0
 
         logger.info(f"📰 Найдено записей: {len(feed.entries)}")
 
         processed_count = 0
         # Обрабатываем записи в обратном порядке (самые новые сначала)
-        for entry in reversed(feed.entries):
+        for entry in reversed(feed.entries[:20]):  # Ограничиваем 20 записями за раз
             try:
                 # Получаем или генерируем уникальный ID
                 post_id = entry.get('id') or entry.get('link') or entry.get('title')
@@ -191,6 +296,7 @@ def process_single_feed(feed_url):
                 link = entry.get('link', '').strip()
 
                 if not link:
+                    logger.warning(f"⚠️  У записи нет ссылки: {title[:50]}...")
                     continue
 
                 # Проверяем, не обрабатывалась ли новость
@@ -198,24 +304,24 @@ def process_single_feed(feed_url):
                     logger.info(f"🆕 Новая запись: {title[:60]}...")
 
                     # Отправляем в Telegram
-                    if send_to_telegram(title, link, feed_url):
-                        mark_as_processed(post_id, feed_url, title)
+                    if send_to_telegram(title, link, clean_feed_url):
+                        mark_as_processed(post_id, clean_feed_url, title)
                         processed_count += 1
 
                         # Небольшая задержка между отправками
-                        time.sleep(0.5)
+                        time.sleep(1)
                     else:
                         logger.error(f"❌ Не удалось отправить: {title[:50]}...")
 
             except Exception as e:
-                logger.error(f"❌ Ошибка обработки записи из {feed_url}: {e}")
+                logger.error(f"❌ Ошибка обработки записи: {e}")
                 continue
 
-        logger.info(f"✅ Обработано новых записей из {feed_url}: {processed_count}")
+        logger.info(f"✅ Обработано новых записей: {processed_count}")
         return processed_count
 
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка обработки фида {feed_url}: {e}")
+        logger.error(f"❌ Критическая ошибка обработки фида: {e}")
         return 0
 
 # Задача для планировщика
@@ -223,21 +329,31 @@ def check_all_feeds():
     logger.info("=" * 50)
     logger.info("🔄 Начинаем проверку всех RSS лент...")
 
+    if not Config.RSS_FEEDS:
+        logger.error("❌ Нет RSS лент для проверки")
+        return 0
+
     total_processed = 0
+    successful_feeds = 0
+
     for i, feed_url in enumerate(Config.RSS_FEEDS, 1):
         feed_url = feed_url.strip()
         if not feed_url:
+            logger.warning(f"⚠️  Пустая строка на позиции {i}, пропускаем")
             continue
 
-        logger.info(f"📋 Лента {i}/{len(Config.RSS_FEEDS)}: {feed_url}")
+        logger.info(f"📋 Лента {i}/{len(Config.RSS_FEEDS)}")
         processed = process_single_feed(feed_url)
         total_processed += processed
 
+        if processed > 0:
+            successful_feeds += 1
+
         # Небольшая задержка между лентами
         if i < len(Config.RSS_FEEDS):
-            time.sleep(1)
+            time.sleep(2)
 
-    logger.info(f"🎯 Итого отправлено новых записей: {total_processed}")
+    logger.info(f"🎯 Итого: {total_processed} новых записей из {successful_feeds} лент")
     logger.info("=" * 50)
     return total_processed
 
@@ -250,7 +366,8 @@ def init_scheduler():
             trigger="interval",
             minutes=Config.CHECK_INTERVAL,
             id="check_feeds_job",
-            replace_existing=True
+            replace_existing=True,
+            max_instances=1
         )
         scheduler.start()
         logger.info(f"⏰ Планировщик запущен. Интервал: {Config.CHECK_INTERVAL} минут")
@@ -267,9 +384,10 @@ def home():
         'status': 'running',
         'service': 'RSS to Telegram Bot',
         'channel': Config.TELEGRAM_CHANNEL_ID,
-        'feeds_count': len(Config.RSS_FEEDS),
+        'total_feeds': len(Config.RSS_FEEDS),
         'check_interval_minutes': Config.CHECK_INTERVAL,
-        'database': Config.DB_FILE
+        'database': Config.DB_FILE,
+        'sample_feeds': Config.RSS_FEEDS[:3] if Config.RSS_FEEDS else []
     })
 
 @app.route('/check-now', methods=['POST', 'GET'])
@@ -286,15 +404,16 @@ def health():
     try:
         # Проверяем подключение к БД
         conn = sqlite3.connect(Config.DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM processed_posts")
+        count = c.fetchone()[0]
         conn.close()
-
-        # Проверяем количество RSS лент
-        feeds_ok = len(Config.RSS_FEEDS) > 0
 
         return jsonify({
             'status': 'healthy',
             'database': 'ok',
-            'feeds_configured': feeds_ok,
+            'total_processed_posts': count,
+            'feeds_configured': len(Config.RSS_FEEDS) > 0,
             'feeds_count': len(Config.RSS_FEEDS),
             'timestamp': datetime.now().isoformat()
         })
@@ -305,64 +424,68 @@ def health():
             'timestamp': datetime.now().isoformat()
         }), 500
 
-@app.route('/stats')
-def stats():
+@app.route('/feeds')
+def list_feeds():
+    return jsonify({
+        'total_feeds': len(Config.RSS_FEEDS),
+        'feeds': Config.RSS_FEEDS,
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/test-feed/<int:feed_index>')
+def test_feed(feed_index):
+    """Тест отдельной RSS ленты"""
+    if feed_index < 0 or feed_index >= len(Config.RSS_FEEDS):
+        return jsonify({'error': 'Invalid feed index'}), 400
+
+    feed_url = Config.RSS_FEEDS[feed_index]
+    logger.info(f"Тестируем ленту {feed_index}: {feed_url}")
+
+    try:
+        feed = feedparser.parse(feed_url)
+        return jsonify({
+            'feed_index': feed_index,
+            'feed_url': feed_url,
+            'feed_title': feed.feed.get('title', 'No title'),
+            'entries_count': len(feed.entries) if feed.entries else 0,
+            'sample_entries': [
+                {
+                    'title': entry.title[:100] if hasattr(entry, 'title') else 'No title',
+                    'link': entry.link if hasattr(entry, 'link') else 'No link'
+                }
+                for entry in (feed.entries[:3] if feed.entries else [])
+            ],
+            'parse_error': str(feed.bozo_exception) if feed.bozo else None
+        })
+    except Exception as e:
+        return jsonify({
+            'feed_index': feed_index,
+            'feed_url': feed_url,
+            'error': str(e)
+        }), 500
+
+@app.route('/clear-db', methods=['POST'])
+def clear_database():
+    """Очистка базы данных (только для отладки)"""
     try:
         conn = sqlite3.connect(Config.DB_FILE)
         c = conn.cursor()
-
-        # Общая статистика
-        c.execute("SELECT COUNT(*) FROM processed_posts")
-        total_posts = c.fetchone()[0]
-
-        # Статистика по источникам
-        c.execute("""
-            SELECT feed_url, COUNT(*) as count
-            FROM processed_posts
-            GROUP BY feed_url
-            ORDER BY count DESC
-        """)
-        by_source = [{"feed": row[0], "count": row[1]} for row in c.fetchall()]
-
-        # Последние 10 записей
-        c.execute("""
-            SELECT title, feed_url, published
-            FROM processed_posts
-            ORDER BY published DESC
-            LIMIT 10
-        """)
-        recent = [{"title": row[0][:50] + "...",
-                   "feed": row[1],
-                   "published": row[2]} for row in c.fetchall()]
-
+        c.execute("DELETE FROM processed_posts")
+        conn.commit()
         conn.close()
-
         return jsonify({
-            'total_posts_processed': total_posts,
-            'posts_by_source': by_source,
-            'recent_posts': recent,
+            'status': 'cleared',
+            'message': 'Database cleared successfully',
             'timestamp': datetime.now().isoformat()
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/test-telegram')
-def test_telegram():
-    """Тестовая отправка сообщения в Telegram"""
-    test_title = "✅ RSS Bot работает!"
-    test_link = "https://github.com"
-
-    success = send_to_telegram(test_title, test_link, "test")
-    return jsonify({
-        'telegram_test': 'success' if success else 'failed',
-        'message_sent': test_title,
-        'timestamp': datetime.now().isoformat()
-    })
-
 # ===================== Основной блок =====================
 
 if __name__ == '__main__':
     logger.info("🚀 Запуск RSS to Telegram Bot")
+    logger.info("=" * 50)
 
     # Проверяем конфигурацию
     if not validate_config():
@@ -378,12 +501,14 @@ if __name__ == '__main__':
     scheduler = init_scheduler()
 
     # Первоначальная проверка (с задержкой для полной инициализации)
-    time.sleep(2)
+    time.sleep(3)
     logger.info("🔍 Выполняем первоначальную проверку...")
-    check_all_feeds()
+    initial_result = check_all_feeds()
+    logger.info(f"📊 Первоначальная проверка завершена. Отправлено: {initial_result} записей")
 
     # Запускаем Flask приложение
     port = int(os.getenv('PORT', 10000))
     logger.info(f"🌐 Flask сервер запускается на порту {port}")
+    logger.info("=" * 50)
 
     app.run(host='0.0.0.0', port=port, debug=False)
