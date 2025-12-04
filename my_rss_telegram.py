@@ -4,15 +4,29 @@ import json
 import feedparser
 import requests
 import time
-import threading
+import logging
 from datetime import datetime
 from flask import Flask
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Вывод в консоль
+        logging.FileHandler('bot.log')  # Запись в файл
+    ]
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 # Получаем настройки из переменных окружения Render
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
+
+logger.info(f"BOT_TOKEN установлен: {'Да' if BOT_TOKEN else 'Нет'}")
+logger.info(f"CHANNEL_ID установлен: {'Да' if CHANNEL_ID else 'Нет'}")
 
 # RSS ленты
 RSS_FEEDS = [
@@ -40,17 +54,25 @@ RSS_FEEDS = [
     "https://overclockers.ru/rss/softnews.rss",
 ]
 
+logger.info(f"Загружено RSS лент: {len(RSS_FEEDS)}")
+
 def load_dates():
     try:
         with open('dates.json', 'r') as f:
             data = json.load(f)
+            logger.info(f"Загружены даты для {len(data)} лент")
             return {url: datetime.fromisoformat(date_str) for url, date_str in data.items()}
-    except:
+    except Exception as e:
+        logger.warning(f"Не удалось загрузить dates.json: {e}")
         return {}
 
 def save_dates(dates_dict):
-    with open('dates.json', 'w') as f:
-        json.dump({k: v.isoformat() for k, v in dates_dict.items()}, f)
+    try:
+        with open('dates.json', 'w') as f:
+            json.dump({k: v.isoformat() for k, v in dates_dict.items()}, f)
+        logger.info(f"Сохранены даты для {len(dates_dict)} лент")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения dates.json: {e}")
 
 def is_russian_text(text):
     if not text:
@@ -66,6 +88,7 @@ def translate_text(text):
         if not text or not text.strip():
             return text, False
 
+        logger.debug(f"Перевод текста: {text[:50]}...")
         url = "https://translate.googleapis.com/translate_a/single"
         params = {
             'client': 'gtx',
@@ -79,12 +102,13 @@ def translate_text(text):
         if response.status_code == 200:
             translated = response.json()[0][0][0]
             if translated and translated.strip() and translated != text:
+                logger.debug(f"Успешно переведено")
                 return translated, True
 
         return text, False
 
     except Exception as e:
-        print(f"  ⚠️  Ошибка перевода: {e}")
+        logger.warning(f"Ошибка перевода: {e}")
         return text, False
 
 def prepare_news_content(title):
@@ -95,10 +119,12 @@ def prepare_news_content(title):
     processed_title = title
 
     if not is_russian_text(title):
+        logger.debug(f"Текст не русский, пробуем перевести: {title[:50]}...")
         translated_title, success = translate_text(title)
         if success:
             processed_title = translated_title
             was_translated = True
+            logger.info(f"Заголовок переведен: {title[:30]}... → {translated_title[:30]}...")
 
     return processed_title, was_translated
 
@@ -112,6 +138,7 @@ def send_to_telegram(title, link):
 
         message = f'<a href="{link}">{clean_title}</a>'
 
+        logger.debug(f"Отправка в Telegram: {title[:50]}...")
         response = requests.post(
             f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage',
             data={
@@ -123,25 +150,34 @@ def send_to_telegram(title, link):
             timeout=10
         )
 
-        return response.status_code == 200
+        if response.status_code == 200:
+            logger.info(f"✅ Отправлено: {title[:50]}...")
+            return True
+        else:
+            logger.error(f"❌ Telegram API error {response.status_code}: {response.text}")
+            return False
 
     except Exception as e:
-        print(f"  ❌ Ошибка отправки: {e}")
+        logger.error(f"❌ Ошибка отправки в Telegram: {e}")
         return False
 
 def check_feeds():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🔍 Проверка новостей...")
+    logger.info(f"🔍 Начало проверки новостей")
 
     dates = load_dates()
     sent_count = 0
 
-    for feed_url in RSS_FEEDS:
+    for i, feed_url in enumerate(RSS_FEEDS, 1):
         try:
+            logger.info(f"[{i}/{len(RSS_FEEDS)}] Проверяем: {feed_url}")
             feed = feedparser.parse(feed_url)
+
             if not feed.entries:
+                logger.warning(f"  📭 Нет записей в ленте")
                 continue
 
             last_date = dates.get(feed_url)
+            logger.debug(f"  Последняя дата для ленты: {last_date}")
 
             new_entries = []
             for entry in feed.entries:
@@ -154,64 +190,104 @@ def check_feeds():
                         break
 
             if new_entries:
-                domain = feed_url.split('//')[1].split('/')[0]
-                print(f"  📰 {domain}: {len(new_entries)} новых")
+                logger.info(f"  🆕 Найдено новых: {len(new_entries)}")
 
-                for entry in reversed(new_entries):
+                for j, entry in enumerate(reversed(new_entries), 1):
+                    logger.info(f"  [{j}/{len(new_entries)}] Обработка: {entry.title[:50]}...")
                     final_title, was_translated = prepare_news_content(entry.title)
 
                     if send_to_telegram(final_title, entry.link):
                         sent_count += 1
+                        logger.info(f"  ⏳ Задержка 10 секунд...")
                         time.sleep(10)
+            else:
+                logger.info(f"  📭 Нет новых новостей")
 
             if feed.entries and hasattr(feed.entries[0], 'published_parsed'):
                 dates[feed_url] = datetime(*feed.entries[0].published_parsed[:6])
+                logger.debug(f"  Обновлена дата: {dates[feed_url]}")
 
         except Exception as e:
-            print(f"  ❌ Ошибка: {feed_url[:40]}...: {str(e)[:50]}")
+            logger.error(f"  ❌ Ошибка ленты {feed_url[:40]}...: {str(e)}")
 
     save_dates(dates)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📊 Отправлено: {sent_count} новостей")
+    logger.info(f"📊 Проверка завершена. Отправлено: {sent_count} новостей")
     return sent_count
-
-def scheduler():
-    print("⏰ Планировщик запущен. Проверка каждые 15 минут.")
-
-    # Первая проверка
-    check_feeds()
-
-    while True:
-        time.sleep(15 * 60)
-        check_feeds()
 
 @app.route('/')
 def home():
-    return "RSS to Telegram Bot работает! ✅"
+    logger.info("Запрос на главную страницу")
+    return """
+    <h1>RSS to Telegram Bot ✅</h1>
+    <p>Бот работает! Проверьте логи в Render Dashboard.</p>
+    <p><a href="/check">Проверить сейчас</a></p>
+    <p><a href="/log">Посмотреть последние логи</a></p>
+    """
+
+@app.route('/check')
+def check():
+    """Этот эндпоинт пингует UptimeRobot каждые 15 минут"""
+    logger.info("=" * 50)
+    logger.info("📞 ВЫЗВАН /check эндпоинт (UptimeRobot)")
+    logger.info("=" * 50)
+
+    result = check_feeds()
+
+    logger.info("=" * 50)
+    logger.info(f"✅ /check завершен. Результат: {result}")
+    logger.info("=" * 50)
+
+    return f"✅ Проверка завершена. Отправлено: {result} новостей"
+
+@app.route('/log')
+def show_log():
+    """Показать последние логи"""
+    try:
+        with open('bot.log', 'r') as f:
+            lines = f.readlines()[-100:]  # Последние 100 строк
+        return "<pre>" + "".join(lines) + "</pre>"
+    except:
+        return "Лог файл не найден"
 
 @app.route('/health')
 def health():
     return "OK"
 
-@app.route('/check')
-def manual_check():
-    result = check_feeds()
-    return f"Проверка завершена. Отправлено: {result} новостей"
+@app.route('/ping')
+def ping():
+    logger.info("Пинг от UptimeRobot")
+    return "pong"
+
+@app.route('/test-telegram')
+def test_telegram():
+    """Тест отправки в Telegram"""
+    test_title = "✅ Тест: RSS Bot работает!"
+    test_link = "https://github.com"
+
+    if send_to_telegram(test_title, test_link):
+        return "Тестовое сообщение отправлено"
+    else:
+        return "Ошибка отправки тестового сообщения"
 
 if __name__ == '__main__':
-    if not BOT_TOKEN or not CHANNEL_ID:
-        print("❌ ОШИБКА: Установите BOT_TOKEN и CHANNEL_ID!")
+    if not BOT_TOKEN:
+        logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не установлен!")
         exit(1)
 
-    print("=" * 50)
-    print("🚀 RSS to Telegram Bot запущен")
-    print(f"📰 Отслеживается лент: {len(RSS_FEEDS)}")
-    print("⏱️  Проверка каждые 15 минут")
-    print("=" * 50)
+    if not CHANNEL_ID:
+        logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: CHANNEL_ID не установлен!")
+        exit(1)
 
-    # Запускаем планировщик в отдельном потоке
-    thread = threading.Thread(target=scheduler, daemon=True)
-    thread.start()
+    logger.info("=" * 50)
+    logger.info("🚀 RSS to Telegram Bot ЗАПУЩЕН")
+    logger.info(f"📰 Отслеживается лент: {len(RSS_FEEDS)}")
+    logger.info("⏰ UptimeRobot будет пинговать /check каждые 15 минут")
+    logger.info("=" * 50)
 
-    # Запускаем Flask сервер
+    # Первая проверка при запуске
+    check_feeds()
+
+    # Запускаем Flask
     port = int(os.getenv('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    logger.info(f"🌐 Flask запускается на порту {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
