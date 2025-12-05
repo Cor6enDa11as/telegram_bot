@@ -6,13 +6,17 @@ import requests
 import time
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -57,14 +61,39 @@ def load_dates():
     try:
         with open('dates.json', 'r') as f:
             data = json.load(f)
-            return {url: datetime.fromisoformat(date_str) for url, date_str in data.items()}
-    except:
+            # Конвертируем строки в datetime
+            for url, info in data.items():
+                if isinstance(info, dict) and 'last_date' in info:
+                    info['last_date'] = datetime.fromisoformat(info['last_date'])
+            return data
+    except FileNotFoundError:
+        logger.info("📁 Файл dates.json не найден, создаём новый")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ Ошибка чтения dates.json: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки dates.json: {e}")
         return {}
 
 def save_dates(dates_dict):
     """Сохраняем даты в файл"""
-    with open('dates.json', 'w') as f:
-        json.dump({k: v.isoformat() for k, v in dates_dict.items()}, f)
+    try:
+        # Конвертируем datetime в строки
+        data_to_save = {}
+        for url, info in dates_dict.items():
+            if isinstance(info, dict) and 'last_date' in info and isinstance(info['last_date'], datetime):
+                data_to_save[url] = {
+                    'last_date': info['last_date'].isoformat(),
+                    'error_count': info.get('error_count', 0)
+                }
+            else:
+                data_to_save[url] = info
+
+        with open('dates.json', 'w') as f:
+            json.dump(data_to_save, f, indent=2)
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения dates.json: {e}")
 
 def is_russian_text(text):
     """Определяет, является ли текст русским"""
@@ -99,8 +128,17 @@ def translate_text(text):
 
         return text, False
 
+    except requests.exceptions.Timeout:
+        logger.warning("⏱️ Таймаут при переводе")
+        return text, False
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"🌐 Ошибка сети при переводе: {e}")
+        return text, False
+    except (IndexError, KeyError) as e:
+        logger.warning(f"📊 Ошибка парсинга ответа перевода: {e}")
+        return text, False
     except Exception as e:
-        logger.warning(f"Ошибка перевода: {e}")
+        logger.warning(f"⚠️ Ошибка перевода: {e}")
         return text, False
 
 def send_to_telegram(title, link):
@@ -127,101 +165,248 @@ def send_to_telegram(title, link):
             timeout=10
         )
 
-        return response.status_code == 200
+        if response.status_code == 200:
+            return True
+        else:
+            logger.error(f"🤖 Telegram API ошибка {response.status_code}: {response.text[:100]}")
+            return False
 
-    except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
+    except requests.exceptions.Timeout:
+        logger.error("⏱️ Таймаут Telegram API")
         return False
+    except requests.exceptions.RequestException as e:
+        logger.error(f"🌐 Ошибка сети Telegram API: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"🤖 Ошибка отправки в Telegram: {e}")
+        return False
+
+def initialize_first_run():
+    """Инициализация при первом запуске"""
+    logger.info("🔄 Первый запуск - инициализация лент")
+    dates = {}
+
+    for feed_url in RSS_FEEDS:
+        try:
+            logger.info(f"  Инициализация: {feed_url[:50]}...")
+
+            feed = feedparser.parse(feed_url)
+
+            # Проверка 1: Лента не пустая
+            if not feed.entries:
+                logger.error(f"    ❌ Пустая лента, пропускаем")
+                continue
+
+            # Проверка 2: Есть даты у новостей
+            if not hasattr(feed.entries[0], 'published_parsed'):
+                logger.error(f"    ❌ Лента без дат, пропускаем")
+                continue
+
+            # Берём самую свежую новость
+            entry = feed.entries[0]
+            title = entry.title
+
+            # Перевод если нужно
+            if not is_russian_text(title):
+                translated, success = translate_text(title)
+                if success:
+                    title = translated
+                    logger.debug(f"    🌐 Переведено: {title[:50]}...")
+
+            # Отправляем в Telegram
+            logger.info(f"    📤 Отправка: {title[:60]}...")
+            if send_to_telegram(title, entry.link):
+                # Сохраняем дату этой новости
+                pub_date = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                dates[feed_url] = {
+                    'last_date': pub_date,
+                    'error_count': 0
+                }
+                save_dates(dates)
+                logger.info(f"    ✅ Успешно, дата: {pub_date.strftime('%H:%M')}")
+
+                time.sleep(10)  # Задержка между лентами
+            else:
+                logger.error(f"    ❌ Ошибка отправки")
+
+        except requests.exceptions.Timeout:
+            logger.error(f"    ⏱️ Таймаут при инициализации")
+        except requests.exceptions.ConnectionError:
+            logger.error(f"    🔌 Ошибка подключения")
+        except Exception as e:
+            logger.error(f"    ❌ Ошибка инициализации: {str(e)[:50]}")
+
+    logger.info(f"✅ Инициализация завершена. Успешно: {len(dates)}/{len(RSS_FEEDS)} лент")
+    return dates
 
 def check_feeds():
     """Проверяем все RSS ленты"""
     global last_check_time, is_checking
 
     if is_checking:
-        logger.info("⚠️  Проверка уже выполняется, пропускаем")
+        logger.info("⚠️ Проверка уже выполняется, пропускаем")
         return 0
 
     is_checking = True
     try:
-        logger.info(f"🔍 Начало проверки новостей")
+        logger.info("=" * 50)
+        logger.info("🔍 Начало проверки новостей")
 
         # Загружаем сохраненные даты
         dates = load_dates()
 
         # Если первый запуск - инициализируем
         if not dates:
-            logger.info("🔄 Первый запуск - инициализация")
-            for feed_url in RSS_FEEDS:
-                try:
-                    feed = feedparser.parse(feed_url)
-                    if feed.entries and hasattr(feed.entries[0], 'published_parsed'):
-                        dates[feed_url] = datetime(*feed.entries[0].published_parsed[:6])
-                        logger.info(f"  Инициализирована: {feed_url[:50]}...")
-                except:
-                    pass
-            save_dates(dates)
-            logger.info("✅ Инициализация завершена")
-            last_check_time = datetime.now()
-            return 0
+            dates = initialize_first_run()
+            last_check_time = datetime.now(timezone.utc)
+            return len(dates)
 
         sent_count = 0
 
         # Проверяем каждую ленту
         for feed_url in RSS_FEEDS:
             try:
+                logger.info(f"📰 Проверка: {feed_url[:50]}...")
+
+                # Загружаем состояние ленты
+                if feed_url in dates:
+                    last_date = dates[feed_url]['last_date']
+                    error_count = dates[feed_url].get('error_count', 0)
+                else:
+                    last_date = None  # Лента новая или была удалена
+                    error_count = 0
+
+                # Получаем ленту
                 feed = feedparser.parse(feed_url)
+
+                # Проверка 1: Лента не пустая
                 if not feed.entries:
+                    logger.error(f"  ❌ Пустая лента")
+                    if feed_url in dates:
+                        del dates[feed_url]
+                        save_dates(dates)
                     continue
 
-                last_date = dates.get(feed_url)
+                # Проверка 2: Есть даты у новостей
+                if not hasattr(feed.entries[0], 'published_parsed'):
+                    logger.error(f"  ❌ Лента без дат")
+                    if feed_url in dates:
+                        del dates[feed_url]
+                        save_dates(dates)
+                    continue
 
-                # Собираем новые новости
-                new_entries = []
-                for entry in feed.entries:
-                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                        pub_date = datetime(*entry.published_parsed[:6])
+                # Определяем самую свежую дату в ленте
+                latest_entry = feed.entries[0]
+                latest_date = datetime(*latest_entry.published_parsed[:6], tzinfo=timezone.utc)
 
-                        if not last_date or pub_date > last_date:
-                            new_entries.append(entry)
-                        else:
-                            break
+                # ЛОГИКА ОТПРАВКИ НОВОСТЕЙ
+                if last_date is None:
+                    # СИТУАЦИЯ: Лента новая или была удалена
+                    # Берём САМУЮ СВЕЖУЮ новость
+                    entry = latest_entry
+                    title = entry.title
 
-                # Отправляем новые новости
-                if new_entries:
-                    logger.info(f"  {feed_url[:40]}...: {len(new_entries)} новых")
+                    # Перевод если нужно
+                    if not is_russian_text(title):
+                        translated, success = translate_text(title)
+                        if success:
+                            title = translated
 
-                    # Отправляем в обратном порядке (старые → новые)
-                    for entry in reversed(new_entries):
-                        # Определяем язык и переводим если нужно
-                        title = entry.title
-                        if not is_russian_text(title):
-                            translated, success = translate_text(title)
-                            if success:
-                                title = translated
+                    # Отправляем
+                    logger.info(f"  📤 Отправка (новая лента): {title[:60]}...")
+                    if send_to_telegram(title, entry.link):
+                        sent_count += 1
+                        dates[feed_url] = {
+                            'last_date': latest_date,
+                            'error_count': 0
+                        }
+                        save_dates(dates)
+                        time.sleep(10)
 
-                        # Отправляем в Telegram
-                        if send_to_telegram(title, entry.link):
-                            sent_count += 1
-                            logger.info(f"    ✅ Отправлено: {title[:50]}...")
+                else:
+                    # СИТУАЦИЯ: Лента уже отслеживается
+                    # Ищем ВСЕ новости новее last_date
+                    new_entries = []
+                    for entry in feed.entries:
+                        if hasattr(entry, 'published_parsed'):
+                            pub_date = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                            if pub_date > last_date:
+                                new_entries.append(entry)
 
-                            # ЗАДЕРЖКА МЕЖДУ НОВОСТЯМИ
-                            time.sleep(10)
+                    # Если есть новые новости
+                    if new_entries:
+                        logger.info(f"  📦 Найдено новых: {len(new_entries)}")
 
-                # Обновляем дату для этой ленты
-                if feed.entries and hasattr(feed.entries[0], 'published_parsed'):
-                    dates[feed_url] = datetime(*feed.entries[0].published_parsed[:6])
+                        # СОРТИРУЕМ от СТАРОЙ к НОВОЙ
+                        new_entries.sort(key=lambda x: datetime(*x.published_parsed[:6], tzinfo=timezone.utc))
 
+                        # Отправляем каждую в правильном порядке
+                        for entry in new_entries:
+                            title = entry.title
+                            pub_date = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+
+                            # Перевод если нужно
+                            if not is_russian_text(title):
+                                translated, success = translate_text(title)
+                                if success:
+                                    title = translated
+
+                            # Отправляем
+                            logger.info(f"  📤 Отправка [{pub_date.strftime('%H:%M')}]: {title[:60]}...")
+                            if send_to_telegram(title, entry.link):
+                                sent_count += 1
+                                dates[feed_url] = {
+                                    'last_date': pub_date,
+                                    'error_count': 0
+                                }
+                                save_dates(dates)  # Атомарно сохраняем
+                                time.sleep(10)  # Задержка между новостями
+
+                    else:
+                        logger.info(f"  ✅ Нет новых новостей (последняя: {last_date.strftime('%H:%M')})")
+
+                # Сбрасываем счётчик ошибок при успешной обработке
+                if feed_url in dates:
+                    dates[feed_url]['error_count'] = 0
+                    save_dates(dates)
+
+            except requests.exceptions.Timeout:
+                logger.error(f"  ⏱️ Таймаут при получении ленты")
+                handle_feed_error(feed_url, dates, error_count)
+            except requests.exceptions.ConnectionError:
+                logger.error(f"  🔌 Ошибка подключения")
+                handle_feed_error(feed_url, dates, error_count)
+            except requests.exceptions.HTTPError as e:
+                logger.error(f"  🌐 HTTP ошибка: {e.response.status_code if e.response else 'нет ответа'}")
+                handle_feed_error(feed_url, dates, error_count)
             except Exception as e:
-                logger.error(f"  Ошибка ленты: {str(e)[:50]}")
+                logger.error(f"  ❌ Ошибка обработки ленты: {str(e)[:50]}")
+                handle_feed_error(feed_url, dates, error_count)
 
         # Сохраняем обновленные даты
         save_dates(dates)
-        last_check_time = datetime.now()
+        last_check_time = datetime.now(timezone.utc)
         logger.info(f"📊 Проверка завершена. Отправлено: {sent_count} новостей")
+        logger.info("=" * 50)
         return sent_count
 
     finally:
         is_checking = False
+
+def handle_feed_error(feed_url, dates, error_count):
+    """Обработка ошибок ленты"""
+    if feed_url in dates:
+        dates[feed_url]['error_count'] = error_count + 1
+
+        # Если 3 ошибки подряд - удаляем ленту
+        if dates[feed_url]['error_count'] >= 3:
+            del dates[feed_url]
+            logger.info(f"  🗑️ Лента удалена после 3 ошибок")
+        else:
+            save_dates(dates)
+    else:
+        # Лента ещё не отслеживалась, просто не добавляем
+        pass
 
 def auto_check_scheduler():
     """Фоновая задача: проверка каждые 15 минут"""
@@ -239,53 +424,57 @@ def auto_check_scheduler():
 @app.route('/')
 def home():
     global last_check_time
-    next_check = "скоро"
+    status = "🔄 Проверка выполняется" if is_checking else "✅ Готов"
+
     if last_check_time:
-        next_check_time = last_check_time + timedelta(minutes=15)
-        next_check = next_check_time.strftime("%H:%M:%S")
+        next_check = last_check_time + timedelta(minutes=15)
+        next_str = next_check.strftime("%H:%M")
+        last_str = last_check_time.strftime("%H:%M:%S")
+    else:
+        next_str = "скоро"
+        last_str = "никогда"
 
     return f"""
-    <h1>RSS to Telegram Bot ✅</h1>
-    <p>Бот работает автоматически.</p>
-    <p>Задержка между новостями: 10 секунд</p>
-    <p>Проверка каждые: 15 минут</p>
-    <p>Следующая проверка: {next_check}</p>
-    <p><a href="/check">Проверить сейчас</a></p>
-    <p><a href="/status">Статус</a></p>
-    """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>RSS to Telegram Bot</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }}
+            h1 {{ color: #333; }}
+            .status {{ padding: 10px; border-radius: 5px; margin: 10px 0; }}
+            .checking {{ background: #fff3cd; border: 1px solid #ffeaa7; }}
+            .ready {{ background: #d1ecf1; border: 1px solid #bee5eb; }}
+            .info {{ background: #f8f9fa; padding: 15px; border-radius: 5px; }}
+        </style>
+    </head>
+    <body>
+        <h1>📰 RSS to Telegram Bot</h1>
 
-@app.route('/check')
-def check():
-    """Ручная проверка"""
-    result = check_feeds()
-    return f"✅ Проверка завершена. Отправлено: {result} новостей"
+        <div class="status {'checking' if is_checking else 'ready'}">
+            <strong>Статус:</strong> {status}
+        </div>
 
-@app.route('/status')
-def status():
-    global last_check_time, is_checking
-    status_text = "Проверка выполняется" if is_checking else "Готов"
+        <div class="info">
+            <p>✅ Бот работает в автоматическом режиме</p>
+            <p>📰 Лент отслеживается: <strong>{len(RSS_FEEDS)}</strong></p>
+            <p>⏰ Проверка каждые: <strong>15 минут</strong></p>
+            <p>⏳ Задержка между новостями: <strong>10 секунд</strong></p>
+            <hr>
+            <p>Последняя проверка: <strong>{last_str}</strong></p>
+            <p>Следующая проверка: <strong>{next_str}</strong></p>
+        </div>
 
-    next_check = "скоро"
-    if last_check_time:
-        next_check_time = last_check_time + timedelta(minutes=15)
-        next_check = next_check_time.strftime("%H:%M:%S")
-
-    return f"""
-    <h2>Статус бота</h2>
-    <p>Состояние: {status_text}</p>
-    <p>Последняя проверка: {last_check_time.strftime('%H:%M:%S') if last_check_time else 'никогда'}</p>
-    <p>Следующая проверка: {next_check}</p>
-    <p>Лент отслеживается: {len(RSS_FEEDS)}</p>
-    <p><a href="/">На главную</a></p>
+        <p><small>Бот автоматически удаляет проблемные ленты (пустые, без дат, с ошибками)</small></p>
+    </body>
+    </html>
     """
 
 @app.route('/health')
 def health():
     return "OK"
-
-@app.route('/ping')
-def ping():
-    return "pong"
 
 if __name__ == '__main__':
     if not BOT_TOKEN or not CHANNEL_ID:
