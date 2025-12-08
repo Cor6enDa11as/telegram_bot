@@ -68,7 +68,7 @@ RSS_FEEDS = [
     "https://www.opennet.ru/opennews/opennews_full_utf.rss",
     "https://mobile-review.com/all/news/feed/",
     "https://www.linux.org.ru/section-rss.jsp?section=1",
-    "https://www.phoronix.com/rss.php",,
+    "https://www.phoronix.com/rss.php",
     "https://www.gsmarena.com/rss-news-reviews.php3",
     "https://www.ixbt.com/live/rss/blog/mobile/",
     "https://www.ixbt.com/export/sec_pda.rss",
