@@ -1,0 +1,21 @@
+name: RSS Telegram Bot
+on:
+  schedule:
+    - cron: '*/30 2-20 * * *'
+  workflow_dispatch:
+jobs:
+  check-feeds:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - run: pip install -r requirements.txt
+    - run: python bot.py
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        REQUEST_DELAY_MIN: 8
+        REQUEST_DELAY_MAX: 20
+        MAX_HOURS_BACK: 24

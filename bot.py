@@ -12,17 +12,17 @@ import logging
 import random
 import re
 from datetime import datetime, timezone, timedelta
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 from urllib.parse import urlparse
 
 # ==================== Загрузка настроек ====================
-load_dotenv()
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-CHANNEL_ID = os.getenv('CHANNEL_ID')
+#load_dotenv()
+#BOT_TOKEN = os.getenv('BOT_TOKEN')
+#CHANNEL_ID = os.getenv('CHANNEL_ID')
 
-if not BOT_TOKEN or not CHANNEL_ID:
-    logging.error("❌ Установите BOT_TOKEN и CHANNEL_ID в .env файле!")
-    exit(1)
+#if not BOT_TOKEN or not CHANNEL_ID:
+#    logging.error("❌ Установите BOT_TOKEN и CHANNEL_ID в .env файле!")
+#    exit(1)
 
 # ✅ ТЕРМИНАЛЬНЫЕ НАСТРОЙКИ TERMUX
 CONFIG = {
