@@ -16,6 +16,6 @@ jobs:
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-        REQUEST_DELAY_MIN: 5
-        REQUEST_DELAY_MAX: 10
-        MAX_HOURS_BACK: 4
+        REQUEST_DELAY_MIN: 8
+        REQUEST_DELAY_MAX: 20
+        MAX_HOURS_BACK: 24
