@@ -1,21 +1,45 @@
-name: Telegram Bot
+name: RSS Telegram Bot
 on:
   schedule:
-    - cron: '*/15 2-20 * * *'
+    # Каждые 30 мин с 5:00 до 22:30 MSK (2:00-19:30 UTC)
+    - cron: '0,30 2-20 * * *'
   workflow_dispatch:
 jobs:
   check-feeds:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
       with:
         python-version: '3.12'
-    - run: pip install -r requirements.txt
-    - run: python bot.py
+
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+
+    - name: Download dates.json (if exists)
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: dates-json
+        path: ./
+
+    - name: Run RSS bot
+      run: python bot.py
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         REQUEST_DELAY_MIN: 8
         REQUEST_DELAY_MAX: 20
         MAX_HOURS_BACK: 24
+
+    - name: Save dates.json (90 дней!)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: dates-json
+        path: dates.json
+        retention-days: 90  # ← 90 ДНЕЙ!
+
