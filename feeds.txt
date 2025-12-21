@@ -1,0 +1,9 @@
+
+https://habr.com/ru/rss/hubs/popular_science/articles/?fl=ru#научпоп #статьи
+https://habr.com/ru/rss/hubs/popular_science/news/?fl=ru#научпоп #новости
+https://habr.com/ru/rss/hubs/DIY/articles/?fl=ru#сделайсам #статьи
+https://habr.com/ru/rss/hubs/DIY/news/?fl=ru#сделайсам #новости
+https://habr.com/ru/rss/hubs/hardware/articles/?fl=ru#пкжелезо #статьи
+https://habr.com/ru/rss/hubs/hardware/news/?fl=ru#пкжелезо #новости
+https://habr.com/ru/rss/hubs/win_dev/articles/?fl=ru#windows #статьи
+https://habr.com/ru/rss/hubs/win_dev/news/?fl=ru#windows #новости
