@@ -1,54 +1,40 @@
 name: RSS Telegram Bot
 on:
   schedule:
-    # Каждые 30 мин с 5:00 до 22:30 MSK
-    - cron: '0,30 2-20 * * *'
+    - cron: '0,30 2-20 * * *'  # каждые 30 мин 5-22:30 MSK
   workflow_dispatch:
 jobs:
   check-feeds:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
     
-    - name: Setup Python
-      uses: actions/setup-python@v5
+    - name: Setup Git
+      run: |
+        git config user.name "RSS Bot"
+        git config user.email "bot@github.com"
+    
+    - uses: actions/setup-python@v5
       with:
         python-version: '3.12'
     
-    - name: Install dependencies
-      run: pip install -r requirements.txt
+    - run: pip install -r requirements.txt
     
-    - name: Download dates.json
-      uses: actions/download-artifact@v4
-      continue-on-error: true
-      with:
-        name: dates-json
-        path: ./
-        merge-multiple: true  # ← КЛЮЧЕВОЕ!
-    
-    - name: Move dates.json to root (if exists)
-      run: |
-        if [ -f "dates-json/dates.json" ]; then
-          mv dates-json/dates.json ./
-          rm -rf dates-json
-          echo "✅ dates.json перемещён в корень"
-        fi
-        ls -la *.json || true
-    
-    - name: Run RSS bot
-      run: python bot.py
+    - run: python bot.py
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         REQUEST_DELAY_MIN: 8
         REQUEST_DELAY_MAX: 20
-        MAX_HOURS_BACK: 24
+        MAX_HOURS_BACK: 24  # ← МОЖНО 24ч!
     
-    - name: Save dates.json
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: dates-json
-        path: dates.json
-        retention-days: 90
+    - name: Commit dates.json to repo
+      run: |
+        git add dates.json || true
+        if git diff --staged --quiet; then
+          echo "Нет изменений в dates.json"
+        else
+          git commit -m "update dates $(date +%Y-%m-%d_%H:%M)"
+          git push
+          echo "✅ dates.json сохранён в репозиторий"
+        fi
