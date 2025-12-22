@@ -3,38 +3,44 @@ on:
   schedule:
     - cron: '0,30 2-20 * * *'  # каждые 30 мин 5-22:30 MSK
   workflow_dispatch:
+permissions:
+  contents: write  # ← РАЗРЕШЕНИЕ на запись!
 jobs:
   check-feeds:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0  # ← ВАЖНО!
     
-    - name: Setup Git
-      run: |
-        git config user.name "RSS Bot"
-        git config user.email "bot@github.com"
-    
-    - uses: actions/setup-python@v5
+    - name: Setup Python
+      uses: actions/setup-python@v5
       with:
         python-version: '3.12'
     
-    - run: pip install -r requirements.txt
+    - name: Install dependencies
+      run: pip install -r requirements.txt
     
-    - run: python bot.py
+    - name: Run RSS bot
+      run: python bot.py
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         REQUEST_DELAY_MIN: 8
         REQUEST_DELAY_MAX: 20
-        MAX_HOURS_BACK: 24  # ← МОЖНО 24ч!
+        MAX_HOURS_BACK: 24  # Теперь можно 24ч!
     
-    - name: Commit dates.json to repo
+    - name: Commit dates.json
       run: |
+        git config user.name "RSS Bot"
+        git config user.email "bot@github.com"
         git add dates.json || true
         if git diff --staged --quiet; then
-          echo "Нет изменений в dates.json"
+          echo "Нет изменений"
         else
-          git commit -m "update dates $(date +%Y-%m-%d_%H:%M)"
+          git commit -m "update dates $(date)"
           git push
-          echo "✅ dates.json сохранён в репозиторий"
+          echo "✅ dates.json сохранён!"
         fi
