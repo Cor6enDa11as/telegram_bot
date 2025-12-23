@@ -203,16 +203,22 @@ def load_rss_feeds():
     return RSS_FEEDS, HASHTAGS
 
 def load_dates():
-    """📅 dates.json → datetime объекты"""
     try:
         with open('dates.json', 'r', encoding='utf-8') as f:
             data = json.load(f)
             for url, info in data.items():
                 if 'last_date' in info:
-                    data[url]['last_date'] = datetime.fromisoformat(info['last_date'])
+                    try:
+                        # ✅ Старый формат Habr (RFC)
+                        parsed_date = datetime.strptime(info['last_date'], '%a, %d %b %Y %H:%M:%S %Z')
+                    except ValueError:
+                        # ✅ Новый ISO формат
+                        parsed_date = datetime.fromisoformat(info['last_date'])
+                    data[url]['last_date'] = parsed_date.replace(tzinfo=timezone.utc)
             return data
     except FileNotFoundError:
         return {}
+
 
 def save_dates(dates_dict):
     """💾 Сохраняет только last_date как ISO строки"""
