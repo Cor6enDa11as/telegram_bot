@@ -244,10 +244,20 @@ def parse_feed(url):
         return None
 
 def get_entry_date(entry):
-    """📅 Дата публикации UTC"""
+    """📅 Дата публикации UTC (RFC + parsed)"""
+    # ✅ ПЕРВЫЙ приоритет: published_parsed (tuple)
+    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+        return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+
+    # ✅ ВТОРОЙ: published (RFC строка)
     if hasattr(entry, 'published') and entry.published:
-        return datetime.fromisoformat(entry.published.replace('Z', '+00:00'))
+        try:
+            return datetime.strptime(entry.published, '%a, %d %b %Y %H:%M:%S %Z').replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
     return datetime.now(timezone.utc)
+
 
 # ==================== ✅ ОСНОВНАЯ ЛОГИКА (ФИКС ДУБЛЕЙ + ФИКС I/O) ====================
 def check_feeds():
