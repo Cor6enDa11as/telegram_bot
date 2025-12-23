@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-🚀 RSS to Telegram Bot (GitHub Actions) - ПОЛНАЯ ВЕРСИЯ С ПОИСКОМ В ОПИСАНИИ
-✅ ФИКС дублей + ✅ ПОЛНЫЙ поиск картинок (5 этапов)
-"""
 
 import os
 import json
@@ -23,11 +19,9 @@ if not BOT_TOKEN or not CHANNEL_ID:
     print("❌ Установите BOT_TOKEN и CHANNEL_ID в GitHub Secrets!")
     exit(1)
 
-CONFIG = {
-    'REQUEST_DELAY_MIN': int(os.getenv('REQUEST_DELAY_MIN', '5')),
-    'REQUEST_DELAY_MAX': int(os.getenv('REQUEST_DELAY_MAX', '10')),
-    'MAX_HOURS_BACK': int(os.getenv('MAX_HOURS_BACK', '24'))
-}
+REQUEST_DELAY_MIN = 5
+REQUEST_DELAY_MAX = 10
+MAX_HOURS_BACK = 24
 
 RSS_FEEDS = []
 HASHTAGS = {}
@@ -37,7 +31,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 def get_entry_image(entry):
-    """🖼️ Этапы 1-4: enclosures → media → thumbnail → image"""
+    """🖼️ Поиск картинок: enclosures → media → thumbnail → image"""
     candidates = [
         getattr(entry, 'enclosures', [{}])[0].get('href') if entry.enclosures else None,
         getattr(entry, 'media_content', [{}])[0].get('url') if hasattr(entry, 'media_content') and entry.media_content else None,
@@ -55,36 +49,40 @@ def get_entry_image(entry):
     return None
 
 def find_image_in_html(description):
-    """🖼️ Этап 5: поиск <img src=...> в HTML описании"""
+    """🖼️ Поиск <img src=...> в HTML (1 regex)"""
     if not description:
         return None
-
-    img_patterns = [
-        r'<img[^>]+src="([^">]+)"',
-        r"<img[^>]+src='([^'>]+)'",
-        r'<img[^>]+src=([^\s>]+)'
-    ]
-
-    for pattern in img_patterns:
-        match = re.search(pattern, description, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    return None
+    match = re.search(r'<img[^>]+src=["\']?([^"\'>]+)["\'>]?', description, re.IGNORECASE)
+    return match.group(1) if match else None
 
 def clean_description(description):
-    """🧹 Очищает HTML, обрезает до 300 символов"""
+    """🧹 Очищает HTML, удаляет 'Читать далее' + &nbsp;, обрезает до 300 символов"""
     if not description:
         return ''
+
+    # ✅ УДАЛЯЕМ "Читать далее" (все варианты)
+    description = re.sub(r'читать\s+далее\s*(→|»|\.{3})?\s*$', '', description, flags=re.IGNORECASE | re.MULTILINE)
+    description = re.sub(r'читать\s+полностью\s*$', '', description, flags=re.IGNORECASE | re.MULTILINE)
+
+    # ✅ УДАЛЯЕМ &nbsp; и множественные пробелы
+    description = description.replace('&nbsp;', ' ').replace(' ', ' ')
+    description = re.sub(r'\s+', ' ', description)
+
+    # ✅ Убираем HTML теги
     description = re.sub(r'<[^>]+>', '', description.strip())
+
+    # ✅ Экранируем для Telegram HTML
     description = description.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    return description[:300] + '...' if len(description) > 300 else description
+
+    # ✅ Обрезаем до 300 символов
+    return description[:300] + '...' if len(description) > 300 else description.strip()
 
 def format_publication_date(pub_date):
     """📅 Формат: 25.12.2025 14:30"""
     return pub_date.strftime('%d.%m.%Y %H:%M')
 
 def send_to_telegram(title, link, feed_url, hashtags_dict, entry, pub_date):
-    """📤 Отправляет пост С ПОЛНЫМ ПОИСКОМ КАРТИНОК (5 этапов)"""
+    """📤 Отправляет пост с умными тегами и картинками"""
     try:
         clean_title = title.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         hashtag = hashtags_dict.get(feed_url, '#новости')
@@ -95,34 +93,33 @@ def send_to_telegram(title, link, feed_url, hashtags_dict, entry, pub_date):
 
         logger.info(f"  📝 Подготовка: {title[:50]}...")
 
-        # 🎯 ПОЛНЫЙ ПОИСК КАРТИНОК (5 этапов)
-        image_url = None
-
-        # Этап 1-4: RSS теги
+        # 🎯 ПОЛНЫЙ ПОИСК КАРТИНОК
         image_url = get_entry_image(entry)
-        if image_url:
-            logger.info(f"  🖼️ Найдено в RSS: {image_url[:60]}...")
-
-        # ✅ Этап 5: HTML описание (ВОЗВРАЩЁН!)
         if not image_url and original_description:
             image_url = find_image_in_html(original_description)
             if image_url:
                 logger.info(f"  🖼️ Найдено в HTML-описании: {image_url[:60]}...")
+        elif image_url:
+            logger.info(f"  🖼️ Найдено в RSS: {image_url[:60]}...")
 
         if not image_url:
             logger.info("  ⚠️ Картинка не найдена")
 
+        # ✅ УМНЫЕ ТЕГИ: если >40 символов → перенос
+        tags_line = f"📌 {hashtag} 👤 #{author}"
+        if len(tags_line) > 40:
+            tags_line = f"📌 {hashtag}\n👤 #{author}"
+
         message_text = f'<a href="{link}">{clean_title}</a>'
         if description:
             message_text += f'\n\n<i>{description}</i>'
-        message_text += f'\n\n📌 {hashtag} 👤 #{author}'
+        message_text += f'\n\n{tags_line}'
 
         # 📸 ОТПРАВКА С КАРТИНКОЙ (приоритет 1)
         if image_url:
             try:
                 if image_url.startswith('//'):
                     image_url = 'https:' + image_url
-                    logger.info(f"  🔗 Фикс URL: {image_url[:60]}...")
 
                 logger.info(f"  📤 Отправка с картинкой...")
                 img_response = requests.get(image_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
@@ -146,8 +143,6 @@ def send_to_telegram(title, link, feed_url, hashtags_dict, entry, pub_date):
                         logger.info("  ✅ ✅ Пост с картинкой отправлен!")
                         time.sleep(random.uniform(1, 3))
                         return True
-                    else:
-                        logger.warning(f"  ⚠️ Фото не отправлено: {response.status_code}")
 
             except Exception as e:
                 logger.warning(f"  ⚠️ Ошибка картинки: {str(e)[:80]}")
@@ -243,11 +238,11 @@ def parse_feed(url):
 
 def get_entry_date(entry):
     """📅 Дата публикации UTC"""
-    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-        return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+    if hasattr(entry, 'published') and entry.published:
+        return datetime.fromisoformat(entry.published.replace('Z', '+00:00'))
     return datetime.now(timezone.utc)
 
-# ==================== ✅ ОСНОВНАЯ ЛОГИКА (ФИКС ДУБЛЕЙ) ====================
+# ==================== ✅ ОСНОВНАЯ ЛОГИКА (ФИКС ДУБЛЕЙ + ФИКС I/O) ====================
 def check_feeds():
     """🔍 ПРОВЕРКА ВСЕХ ЛЕНТ"""
     logger.info("=" * 60)
@@ -261,20 +256,17 @@ def check_feeds():
         try:
             logger.info(f"📰 {feed_url[:50]}...")
 
-            # ✅ КРИТИЧЕСКИЙ ФИКС ДУБЛЕЙ!
             last_date = dates.get(feed_url, {}).get('last_date')
             if last_date is None:
-                # 🎯 ПЕРВЫЙ ЗАПУСК: только 24ч назад
                 threshold_date = datetime.now(timezone.utc) - timedelta(hours=24)
                 logger.info("  🔄 ПЕРВЫЙ запуск: за 24ч")
             else:
-                # 🎯 ДАЛЬШЕ: только новые после last_date
                 threshold_date = last_date
                 logger.info(f"  ⏰ С last_date: {last_date.strftime('%H:%M')}")
 
             feed = parse_feed(feed_url)
             if not feed:
-                time.sleep(random.uniform(CONFIG['REQUEST_DELAY_MIN'], CONFIG['REQUEST_DELAY_MAX']))
+                time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
                 continue
 
             new_entries = []
@@ -298,20 +290,20 @@ def check_feeds():
                     if send_to_telegram(title, link, feed_url, HASHTAGS, entry, pub_date):
                         sent_count += 1
                         dates[feed_url] = {'last_date': pub_date}
-                        save_dates(dates)  # Сохраняем после каждой!
+                        # ✅ ФИКС I/O: сохраняем ТОЛЬКО в конце!
                     else:
                         logger.error("  ❌ Ошибка отправки")
                         break
             else:
                 logger.info("  ✅ Нет новых")
 
-            time.sleep(random.uniform(CONFIG['REQUEST_DELAY_MIN'], CONFIG['REQUEST_DELAY_MAX']))
+            time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
 
         except Exception as e:
             logger.error(f"  ❌ Ошибка: {e}")
             continue
 
-    save_dates(dates)  # Финальное сохранение
+    save_dates(dates)  # ✅ ФИНАЛЬНОЕ сохранение (1 раз!)
     logger.info(f"📊 ГОТОВО! Отправлено: {sent_count}")
     logger.info(f"⏱️ {time.time() - start_time:.1f}с")
     logger.info("=" * 60)
@@ -321,10 +313,11 @@ def check_feeds():
 if __name__ == '__main__':
     logger.info("=" * 60)
     load_rss_feeds()
-    logger.info(f"⏰ Задержки: {CONFIG['REQUEST_DELAY_MIN']}-{CONFIG['REQUEST_DELAY_MAX']}с")
+    logger.info(f"⏰ Задержки: {REQUEST_DELAY_MIN}-{REQUEST_DELAY_MAX}с")
     logger.info("🆕 Логика: 1й запуск=24ч, далее=только новые")
-    logger.info("🖼️ Поиск картинок: 5 этапов (RSS + HTML)")
+    logger.info("🖼️ Поиск картинок: RSS + HTML")
+    logger.info("✅ Фикс: I/O + 'Читать далее' + умные теги")
     logger.info("=" * 60)
 
     sent_count = check_feeds()
-    logger.info(f"✅ ПЕРФЕКТ! Отправлено: {sent_count} 🚀")
+    logger.info(f"✅ Отправлено: {sent_count} 🚀")
